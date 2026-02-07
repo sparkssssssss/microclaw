@@ -100,7 +100,7 @@ MCP (optional):
 EXAMPLES:
     microclaw start          Start the bot
     microclaw setup          Run interactive setup wizard
-    microclaw --version      Show version
+    microclaw version        Show version
     microclaw help           Show this message
 
 ABOUT:
