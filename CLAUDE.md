@@ -24,6 +24,7 @@ Rust 2021, Tokio, teloxide 0.17, serenity 0.12, Anthropic Messages API (direct H
 - `src/tools/glob.rs`, `grep.rs` -- file/content search (with path guard filtering)
 - `src/tools/memory.rs` -- read_memory, write_memory
 - `src/tools/web_search.rs` -- DuckDuckGo search
+- `src/tools/browser.rs` -- headless browser automation (agent-browser CLI wrapper)
 - `src/tools/web_fetch.rs` -- URL fetching with HTML stripping
 - `src/tools/send_message.rs` -- mid-conversation Telegram messaging
 - `src/tools/schedule.rs` -- 5 scheduling tools
