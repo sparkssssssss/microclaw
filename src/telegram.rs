@@ -135,6 +135,28 @@ async fn handle_message(
         return Ok(());
     }
 
+    // Handle /archive command — archive current session to markdown
+    if text.trim() == "/archive" {
+        let chat_id = msg.chat.id.0;
+        if let Ok(Some((json, _))) = state.db.load_session(chat_id) {
+            let messages: Vec<Message> = serde_json::from_str(&json).unwrap_or_default();
+            if messages.is_empty() {
+                let _ = bot.send_message(msg.chat.id, "No session to archive.").await;
+            } else {
+                archive_conversation(&state.config.data_dir, chat_id, &messages);
+                let _ = bot
+                    .send_message(
+                        msg.chat.id,
+                        format!("Archived {} messages.", messages.len()),
+                    )
+                    .await;
+            }
+        } else {
+            let _ = bot.send_message(msg.chat.id, "No session to archive.").await;
+        }
+        return Ok(());
+    }
+
     if let Some(photos) = msg.photo() {
         // Pick the largest photo (last in the array)
         if let Some(photo) = photos.last() {
@@ -820,7 +842,7 @@ fn strip_images_for_session(messages: &mut [Message]) {
 
 /// Archive the full conversation to a markdown file before compaction.
 /// Saved to `<data_dir>/groups/<chat_id>/conversations/<timestamp>.md`.
-fn archive_conversation(data_dir: &str, chat_id: i64, messages: &[Message]) {
+pub fn archive_conversation(data_dir: &str, chat_id: i64, messages: &[Message]) {
     let now = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let dir = std::path::PathBuf::from(data_dir)
         .join("groups")

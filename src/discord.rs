@@ -7,8 +7,9 @@ use serenity::model::id::ChannelId;
 use serenity::prelude::*;
 use tracing::{error, info};
 
+use crate::claude::Message as ClaudeMessage;
 use crate::db::StoredMessage;
-use crate::telegram::AppState;
+use crate::telegram::{archive_conversation, AppState};
 
 struct Handler {
     app_state: Arc<AppState>,
@@ -48,6 +49,30 @@ impl EventHandler for Handler {
         if text.trim() == "/skills" {
             let formatted = self.app_state.skills.list_skills_formatted();
             let _ = msg.channel_id.say(&ctx.http, &formatted).await;
+            return;
+        }
+
+        // Handle /archive command
+        if text.trim() == "/archive" {
+            if let Ok(Some((json, _))) = self.app_state.db.load_session(channel_id) {
+                let messages: Vec<ClaudeMessage> =
+                    serde_json::from_str(&json).unwrap_or_default();
+                if messages.is_empty() {
+                    let _ = msg.channel_id.say(&ctx.http, "No session to archive.").await;
+                } else {
+                    archive_conversation(
+                        &self.app_state.config.data_dir,
+                        channel_id,
+                        &messages,
+                    );
+                    let _ = msg
+                        .channel_id
+                        .say(&ctx.http, format!("Archived {} messages.", messages.len()))
+                        .await;
+                }
+            } else {
+                let _ = msg.channel_id.say(&ctx.http, "No session to archive.").await;
+            }
             return;
         }
 
