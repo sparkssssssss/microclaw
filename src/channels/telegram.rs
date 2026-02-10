@@ -7,7 +7,7 @@ use tracing::{error, info};
 
 use crate::claude::{ContentBlock, ImageSource, Message, MessageContent, ResponseContentBlock};
 use crate::config::Config;
-use crate::db::{Database, StoredMessage};
+use crate::db::{call_blocking, Database, StoredMessage};
 use crate::llm::LlmProvider;
 use crate::memory::MemoryManager;
 use crate::skills::SkillManager;
@@ -43,14 +43,27 @@ pub struct AppState {
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    Iteration { iteration: usize },
-    ToolStart { name: String },
+    Iteration {
+        iteration: usize,
+    },
+    ToolStart {
+        name: String,
+    },
     ToolResult {
         name: String,
         is_error: bool,
         preview: String,
+        duration_ms: u128,
+        status_code: Option<i32>,
+        bytes: usize,
+        error_type: Option<String>,
     },
-    FinalResponse { text: String },
+    TextDelta {
+        delta: String,
+    },
+    FinalResponse {
+        text: String,
+    },
 }
 
 pub async fn run_bot(
@@ -148,7 +161,7 @@ async fn handle_message(
     // Handle /reset command — clear session
     if text.trim() == "/reset" {
         let chat_id = msg.chat.id.0;
-        let _ = state.db.delete_session(chat_id);
+        let _ = call_blocking(state.db.clone(), move |db| db.delete_session(chat_id)).await;
         let _ = bot.send_message(msg.chat.id, "Session cleared.").await;
         return Ok(());
     }
@@ -163,7 +176,9 @@ async fn handle_message(
     // Handle /archive command — archive current session to markdown
     if text.trim() == "/archive" {
         let chat_id = msg.chat.id.0;
-        if let Ok(Some((json, _))) = state.db.load_session(chat_id) {
+        if let Ok(Some((json, _))) =
+            call_blocking(state.db.clone(), move |db| db.load_session(chat_id)).await
+        {
             let messages: Vec<Message> = serde_json::from_str(&json).unwrap_or_default();
             if messages.is_empty() {
                 let _ = bot
@@ -273,9 +288,12 @@ async fn handle_message(
         && !state.config.allowed_groups.contains(&chat_id)
     {
         // Store message but don't process
-        let _ = state
-            .db
-            .upsert_chat(chat_id, chat_title.as_deref(), chat_type);
+        let chat_title_owned = chat_title.clone();
+        let chat_type_owned = chat_type.to_string();
+        let _ = call_blocking(state.db.clone(), move |db| {
+            db.upsert_chat(chat_id, chat_title_owned.as_deref(), &chat_type_owned)
+        })
+        .await;
         let stored_content = if image_data.is_some() {
             format!(
                 "[image]{}",
@@ -296,14 +314,17 @@ async fn handle_message(
             is_from_bot: false,
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
-        let _ = state.db.store_message(&stored);
+        let _ = call_blocking(state.db.clone(), move |db| db.store_message(&stored)).await;
         return Ok(());
     }
 
     // Store the chat and message
-    let _ = state
-        .db
-        .upsert_chat(chat_id, chat_title.as_deref(), chat_type);
+    let chat_title_owned = chat_title.clone();
+    let chat_type_owned = chat_type.to_string();
+    let _ = call_blocking(state.db.clone(), move |db| {
+        db.upsert_chat(chat_id, chat_title_owned.as_deref(), &chat_type_owned)
+    })
+    .await;
 
     let stored_content = if image_data.is_some() {
         format!(
@@ -325,7 +346,7 @@ async fn handle_message(
         is_from_bot: false,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
-    let _ = state.db.store_message(&stored);
+    let _ = call_blocking(state.db.clone(), move |db| db.store_message(&stored)).await;
 
     // Determine if we should respond
     let should_respond = match chat_type {
@@ -376,7 +397,7 @@ async fn handle_message(
                     is_from_bot: true,
                     timestamp: chrono::Utc::now().to_rfc3339(),
                 };
-                let _ = state.db.store_message(&bot_msg);
+                let _ = call_blocking(state.db.clone(), move |db| db.store_message(&bot_msg)).await;
             }
             // If response is empty, agent likely used send_message tool directly
         }
@@ -461,16 +482,22 @@ pub async fn process_with_agent_with_events(
     );
 
     // Try to resume from session
-    let mut messages = if let Some((json, updated_at)) = state.db.load_session(chat_id)? {
+    let mut messages = if let Some((json, updated_at)) =
+        call_blocking(state.db.clone(), move |db| db.load_session(chat_id)).await?
+    {
         // Session exists — deserialize and append new user messages
         let mut session_messages: Vec<Message> = serde_json::from_str(&json).unwrap_or_default();
 
         if session_messages.is_empty() {
             // Corrupted session, fall back to DB history
-            load_messages_from_db(state, chat_id, chat_type)?
+            load_messages_from_db(state, chat_id, chat_type).await?
         } else {
             // Get new user messages since session was last saved
-            let new_msgs = state.db.get_new_user_messages_since(chat_id, &updated_at)?;
+            let updated_at_cloned = updated_at.clone();
+            let new_msgs = call_blocking(state.db.clone(), move |db| {
+                db.get_new_user_messages_since(chat_id, &updated_at_cloned)
+            })
+            .await?;
             for stored_msg in &new_msgs {
                 let content = format_user_message(&stored_msg.sender_name, &stored_msg.content);
                 // Merge if last message is also from user
@@ -492,7 +519,7 @@ pub async fn process_with_agent_with_events(
         }
     } else {
         // No session — build from DB history
-        load_messages_from_db(state, chat_id, chat_type)?
+        load_messages_from_db(state, chat_id, chat_type).await?
     };
 
     // If override_prompt is provided (from scheduler), add it as a user message
@@ -555,10 +582,32 @@ pub async fn process_with_agent_with_events(
                 iteration: iteration + 1,
             });
         }
-        let response = state
-            .llm
-            .send_message(&system_prompt, messages.clone(), Some(tool_defs.clone()))
-            .await?;
+        let response = if let Some(tx) = event_tx {
+            let (llm_tx, mut llm_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let forward_tx = tx.clone();
+            let forward_handle = tokio::spawn(async move {
+                while let Some(delta) = llm_rx.recv().await {
+                    let _ = forward_tx.send(AgentEvent::TextDelta { delta });
+                }
+            });
+            let response = state
+                .llm
+                .send_message_stream(
+                    &system_prompt,
+                    messages.clone(),
+                    Some(tool_defs.clone()),
+                    Some(&llm_tx),
+                )
+                .await?;
+            drop(llm_tx);
+            let _ = forward_handle.await;
+            response
+        } else {
+            state
+                .llm
+                .send_message(&system_prompt, messages.clone(), Some(tool_defs.clone()))
+                .await?
+        };
 
         let stop_reason = response.stop_reason.as_deref().unwrap_or("end_turn");
 
@@ -580,7 +629,8 @@ pub async fn process_with_agent_with_events(
             });
             strip_images_for_session(&mut messages);
             if let Ok(json) = serde_json::to_string(&messages) {
-                let _ = state.db.save_session(chat_id, &json);
+                let _ = call_blocking(state.db.clone(), move |db| db.save_session(chat_id, &json))
+                    .await;
             }
 
             // Strip <think> blocks unless show_thinking is enabled
@@ -625,6 +675,7 @@ pub async fn process_with_agent_with_events(
                         let _ = tx.send(AgentEvent::ToolStart { name: name.clone() });
                     }
                     info!("Executing tool: {} (iteration {})", name, iteration + 1);
+                    let started = std::time::Instant::now();
                     let result = state
                         .tools
                         .execute_with_auth(name, input.clone(), &tool_auth)
@@ -636,10 +687,22 @@ pub async fn process_with_agent_with_events(
                         } else {
                             result.content.clone()
                         };
+                        let duration_ms = started.elapsed().as_millis();
+                        let status_code = if result.is_error { Some(1) } else { Some(0) };
+                        let bytes = result.content.len();
+                        let error_type = if result.is_error {
+                            Some("tool_error".to_string())
+                        } else {
+                            None
+                        };
                         let _ = tx.send(AgentEvent::ToolResult {
                             name: name.clone(),
                             is_error: result.is_error,
                             preview,
+                            duration_ms,
+                            status_code,
+                            bytes,
+                            error_type,
                         });
                     }
                     tool_results.push(ContentBlock::ToolResult {
@@ -676,7 +739,8 @@ pub async fn process_with_agent_with_events(
         });
         strip_images_for_session(&mut messages);
         if let Ok(json) = serde_json::to_string(&messages) {
-            let _ = state.db.save_session(chat_id, &json);
+            let _ =
+                call_blocking(state.db.clone(), move |db| db.save_session(chat_id, &json)).await;
         }
 
         return Ok(if text.is_empty() {
@@ -699,7 +763,7 @@ pub async fn process_with_agent_with_events(
     });
     strip_images_for_session(&mut messages);
     if let Ok(json) = serde_json::to_string(&messages) {
-        let _ = state.db.save_session(chat_id, &json);
+        let _ = call_blocking(state.db.clone(), move |db| db.save_session(chat_id, &json)).await;
     }
 
     if let Some(tx) = event_tx {
@@ -711,21 +775,22 @@ pub async fn process_with_agent_with_events(
 }
 
 /// Load messages from DB history (non-session path).
-fn load_messages_from_db(
+async fn load_messages_from_db(
     state: &AppState,
     chat_id: i64,
     chat_type: &str,
 ) -> Result<Vec<Message>, anyhow::Error> {
+    let max_history = state.config.max_history_messages;
     let history = if chat_type == "group" {
-        state.db.get_messages_since_last_bot_response(
-            chat_id,
-            state.config.max_history_messages,
-            state.config.max_history_messages,
-        )?
+        call_blocking(state.db.clone(), move |db| {
+            db.get_messages_since_last_bot_response(chat_id, max_history, max_history)
+        })
+        .await?
     } else {
-        state
-            .db
-            .get_recent_messages(chat_id, state.config.max_history_messages)?
+        call_blocking(state.db.clone(), move |db| {
+            db.get_recent_messages(chat_id, max_history)
+        })
+        .await?
     };
     Ok(history_to_claude_messages(
         &history,

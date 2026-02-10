@@ -5,7 +5,7 @@ use serde_json::json;
 
 use super::{authorize_chat_access, schema_object, Tool, ToolResult};
 use crate::claude::ToolDefinition;
-use crate::db::Database;
+use crate::db::{call_blocking, Database};
 
 pub struct ExportChatTool {
     db: Arc<Database>,
@@ -56,10 +56,11 @@ impl Tool for ExportChatTool {
             return ToolResult::error(e);
         }
 
-        let messages = match self.db.get_all_messages(chat_id) {
-            Ok(msgs) => msgs,
-            Err(e) => return ToolResult::error(format!("Failed to load messages: {e}")),
-        };
+        let messages =
+            match call_blocking(self.db.clone(), move |db| db.get_all_messages(chat_id)).await {
+                Ok(msgs) => msgs,
+                Err(e) => return ToolResult::error(format!("Failed to load messages: {e}")),
+            };
 
         if messages.is_empty() {
             return ToolResult::error(format!("No messages found for chat {chat_id}."));

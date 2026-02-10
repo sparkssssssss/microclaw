@@ -16,16 +16,17 @@ use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info};
 
 use crate::config::Config;
-use crate::db::{ChatSummary, StoredMessage};
+use crate::db::{call_blocking, ChatSummary, StoredMessage};
 use crate::telegram::{process_with_agent, process_with_agent_with_events, AgentEvent, AppState};
 
-static WEB_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web");
+static WEB_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web/dist");
 
 #[derive(Clone)]
 struct WebState {
     app_state: Arc<AppState>,
     auth_token: Option<String>,
     run_hub: RunHub,
+    session_hub: SessionHub,
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +38,11 @@ struct RunEvent {
 #[derive(Clone, Default)]
 struct RunHub {
     channels: Arc<Mutex<HashMap<String, broadcast::Sender<RunEvent>>>>,
+}
+
+#[derive(Clone, Default)]
+struct SessionHub {
+    locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl RunHub {
@@ -62,6 +68,16 @@ impl RunHub {
     }
 }
 
+impl SessionHub {
+    async fn lock_for(&self, session_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut guard = self.locks.lock().await;
+        guard
+            .entry(session_key.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+}
+
 fn auth_token_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
         .get("authorization")
@@ -73,16 +89,13 @@ fn auth_token_from_headers(headers: &HeaderMap) -> Option<String> {
 
 fn require_auth(
     headers: &HeaderMap,
-    query_token: Option<&str>,
     expected_token: Option<&str>,
 ) -> Result<(), (StatusCode, String)> {
     let Some(expected) = expected_token else {
         return Ok(());
     };
 
-    let provided = auth_token_from_headers(headers)
-        .or_else(|| query_token.map(|s| s.to_string()))
-        .unwrap_or_default();
+    let provided = auth_token_from_headers(headers).unwrap_or_default();
 
     if provided == expected {
         Ok(())
@@ -141,7 +154,6 @@ struct SendRequest {
 #[derive(Debug, Deserialize)]
 struct StreamQuery {
     run_id: String,
-    token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,13 +211,6 @@ fn redact_config(config: &Config) -> serde_json::Value {
     json!(cfg)
 }
 
-fn serve_asset(path: &str, content_type: &str) -> impl IntoResponse {
-    match WEB_ASSETS.get_file(path) {
-        Some(file) => ([("content-type", content_type)], file.contents().to_vec()).into_response(),
-        None => (StatusCode::NOT_FOUND, "Not Found").into_response(),
-    }
-}
-
 async fn index() -> impl IntoResponse {
     match WEB_ASSETS.get_file("index.html") {
         Some(file) => Html(String::from_utf8_lossy(file.contents()).to_string()).into_response(),
@@ -213,15 +218,11 @@ async fn index() -> impl IntoResponse {
     }
 }
 
-async fn app_js() -> impl IntoResponse {
-    serve_asset("app.js", "application/javascript; charset=utf-8")
-}
-
 async fn api_health(
     headers: HeaderMap,
     State(state): State<WebState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    require_auth(&headers, None, state.auth_token.as_deref())?;
+    require_auth(&headers, state.auth_token.as_deref())?;
     Ok(Json(json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
@@ -233,7 +234,7 @@ async fn api_get_config(
     headers: HeaderMap,
     State(state): State<WebState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    require_auth(&headers, None, state.auth_token.as_deref())?;
+    require_auth(&headers, state.auth_token.as_deref())?;
 
     let path = config_path_for_save()?;
     Ok(Json(json!({
@@ -249,7 +250,7 @@ async fn api_update_config(
     State(state): State<WebState>,
     Json(body): Json<UpdateConfigRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    require_auth(&headers, None, state.auth_token.as_deref())?;
+    require_auth(&headers, state.auth_token.as_deref())?;
 
     let mut cfg = state.app_state.config.clone();
 
@@ -318,13 +319,13 @@ async fn api_sessions(
     headers: HeaderMap,
     State(state): State<WebState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    require_auth(&headers, None, state.auth_token.as_deref())?;
+    require_auth(&headers, state.auth_token.as_deref())?;
 
-    let chats = state
-        .app_state
-        .db
-        .get_chats_by_type("web", 200)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let chats = call_blocking(state.app_state.db.clone(), |db| {
+        db.get_chats_by_type("web", 200)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let sessions = chats
         .into_iter()
@@ -338,16 +339,16 @@ async fn api_history(
     State(state): State<WebState>,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    require_auth(&headers, None, state.auth_token.as_deref())?;
+    require_auth(&headers, state.auth_token.as_deref())?;
 
     let session_key = normalize_session_key(query.session_key.as_deref());
     let chat_id = session_key_to_chat_id(&session_key);
 
-    let mut messages = state
-        .app_state
-        .db
-        .get_all_messages(chat_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut messages = call_blocking(state.app_state.db.clone(), move |db| {
+        db.get_all_messages(chat_id)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if let Some(limit) = query.limit {
         if messages.len() > limit {
@@ -379,7 +380,7 @@ async fn api_send(
     State(state): State<WebState>,
     Json(body): Json<SendRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    require_auth(&headers, None, state.auth_token.as_deref())?;
+    require_auth(&headers, state.auth_token.as_deref())?;
     send_and_store_response(state, body).await
 }
 
@@ -388,7 +389,7 @@ async fn api_send_stream(
     State(state): State<WebState>,
     Json(body): Json<SendRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    require_auth(&headers, None, state.auth_token.as_deref())?;
+    require_auth(&headers, state.auth_token.as_deref())?;
 
     let text = body.message.trim().to_string();
     if text.is_empty() {
@@ -399,8 +400,11 @@ async fn api_send_stream(
     let sender = state.run_hub.create(&run_id).await;
     let state_for_task = state.clone();
     let run_id_for_task = run_id.clone();
+    let session_key = normalize_session_key(body.session_key.as_deref());
+    let lock = state.session_hub.lock_for(&session_key).await;
 
     tokio::spawn(async move {
+        let _guard = lock.lock().await;
         let _ = sender.send(RunEvent {
             event: "status".into(),
             data: json!({"message": "running"}).to_string(),
@@ -427,11 +431,29 @@ async fn api_send_stream(
                         name,
                         is_error,
                         preview,
+                        duration_ms,
+                        status_code,
+                        bytes,
+                        error_type,
                     } => {
                         let _ = event_sender.send(RunEvent {
                             event: "tool_result".into(),
-                            data: json!({"name": name, "is_error": is_error, "preview": preview})
-                                .to_string(),
+                            data: json!({
+                                "name": name,
+                                "is_error": is_error,
+                                "preview": preview,
+                                "duration_ms": duration_ms,
+                                "status_code": status_code,
+                                "bytes": bytes,
+                                "error_type": error_type
+                            })
+                            .to_string(),
+                        });
+                    }
+                    AgentEvent::TextDelta { delta } => {
+                        let _ = event_sender.send(RunEvent {
+                            event: "delta".into(),
+                            data: json!({"delta": delta}).to_string(),
                         });
                     }
                     AgentEvent::FinalResponse { .. } => {}
@@ -448,14 +470,6 @@ async fn api_send_stream(
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
-
-                for chunk in chunk_text(&response_text, 80) {
-                    let _ = sender.send(RunEvent {
-                        event: "delta".into(),
-                        data: json!({"delta": chunk}).to_string(),
-                    });
-                    tokio::time::sleep(std::time::Duration::from_millis(18)).await;
-                }
 
                 let _ = sender.send(RunEvent {
                     event: "done".into(),
@@ -489,11 +503,7 @@ async fn api_stream(
     State(state): State<WebState>,
     Query(query): Query<StreamQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    require_auth(
-        &headers,
-        query.token.as_deref(),
-        state.auth_token.as_deref(),
-    )?;
+    require_auth(&headers, state.auth_token.as_deref())?;
 
     let Some(channel) = state.run_hub.get(&query.run_id).await else {
         return Err((StatusCode::NOT_FOUND, "run not found".into()));
@@ -532,6 +542,9 @@ async fn send_and_store_response(
     state: WebState,
     body: SendRequest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let session_key = normalize_session_key(body.session_key.as_deref());
+    let lock = state.session_hub.lock_for(&session_key).await;
+    let _guard = lock.lock().await;
     send_and_store_response_with_events(state, body, None).await
 }
 
@@ -555,11 +568,12 @@ async fn send_and_store_response_with_events(
         .unwrap_or("web-user")
         .to_string();
 
-    state
-        .app_state
-        .db
-        .upsert_chat(chat_id, Some(&session_key), "web")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let session_key_for_chat = session_key.clone();
+    call_blocking(state.app_state.db.clone(), move |db| {
+        db.upsert_chat(chat_id, Some(&session_key_for_chat), "web")
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let user_msg = StoredMessage {
         id: uuid::Uuid::new_v4().to_string(),
@@ -569,11 +583,11 @@ async fn send_and_store_response_with_events(
         is_from_bot: false,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
-    state
-        .app_state
-        .db
-        .store_message(&user_msg)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    call_blocking(state.app_state.db.clone(), move |db| {
+        db.store_message(&user_msg)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let response = if let Some(tx) = event_tx {
         process_with_agent_with_events(
@@ -588,9 +602,16 @@ async fn send_and_store_response_with_events(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     } else {
-        process_with_agent(&state.app_state, chat_id, &sender_name, "private", None, None)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        process_with_agent(
+            &state.app_state,
+            chat_id,
+            &sender_name,
+            "private",
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
 
     let bot_msg = StoredMessage {
@@ -601,11 +622,11 @@ async fn send_and_store_response_with_events(
         is_from_bot: true,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
-    state
-        .app_state
-        .db
-        .store_message(&bot_msg)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    call_blocking(state.app_state.db.clone(), move |db| {
+        db.store_message(&bot_msg)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({
         "ok": true,
@@ -620,41 +641,18 @@ async fn api_reset(
     State(state): State<WebState>,
     Json(body): Json<ResetRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    require_auth(&headers, None, state.auth_token.as_deref())?;
+    require_auth(&headers, state.auth_token.as_deref())?;
 
     let session_key = normalize_session_key(body.session_key.as_deref());
     let chat_id = session_key_to_chat_id(&session_key);
 
-    let deleted = state
-        .app_state
-        .db
-        .delete_session(chat_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let deleted = call_blocking(state.app_state.db.clone(), move |db| {
+        db.delete_session(chat_id)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({ "ok": true, "deleted": deleted })))
-}
-
-fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![];
-    }
-    if text.chars().count() <= max_chars {
-        return vec![text.to_string()];
-    }
-
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for ch in text.chars() {
-        current.push(ch);
-        if current.chars().count() >= max_chars {
-            out.push(current);
-            current = String::new();
-        }
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    out
 }
 
 pub async fn start_web_server(state: Arc<AppState>) {
@@ -662,21 +660,10 @@ pub async fn start_web_server(state: Arc<AppState>) {
         auth_token: state.config.web_auth_token.clone(),
         app_state: state.clone(),
         run_hub: RunHub::default(),
+        session_hub: SessionHub::default(),
     };
 
-    let router = Router::new()
-        .route("/", get(index))
-        .route("/app.js", get(app_js))
-        .route("/assets/:file", get(asset_file))
-        .route("/api/health", get(api_health))
-        .route("/api/config", get(api_get_config).put(api_update_config))
-        .route("/api/sessions", get(api_sessions))
-        .route("/api/history", get(api_history))
-        .route("/api/send", post(api_send))
-        .route("/api/send_stream", post(api_send_stream))
-        .route("/api/stream", get(api_stream))
-        .route("/api/reset", post(api_reset))
-        .with_state(web_state);
+    let router = build_router(web_state);
 
     let addr = format!("{}:{}", state.config.web_host, state.config.web_port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -707,5 +694,159 @@ async fn asset_file(Path(file): Path<String>) -> impl IntoResponse {
             ([("content-type", content_type)], file.contents().to_vec()).into_response()
         }
         None => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+    }
+}
+
+fn build_router(web_state: WebState) -> Router {
+    Router::new()
+        .route("/", get(index))
+        .route("/assets/*file", get(asset_file))
+        .route("/api/health", get(api_health))
+        .route("/api/config", get(api_get_config).put(api_update_config))
+        .route("/api/sessions", get(api_sessions))
+        .route("/api/history", get(api_history))
+        .route("/api/send", post(api_send))
+        .route("/api/send_stream", post(api_send_stream))
+        .route("/api/stream", get(api_stream))
+        .route("/api/reset", post(api_reset))
+        .with_state(web_state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::llm::LlmProvider;
+    use crate::{db::Database, memory::MemoryManager, skills::SkillManager, tools::ToolRegistry};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use teloxide::Bot;
+    use tower::ServiceExt;
+
+    struct DummyLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DummyLlm {
+        async fn send_message(
+            &self,
+            _system: &str,
+            _messages: Vec<crate::claude::Message>,
+            _tools: Option<Vec<crate::claude::ToolDefinition>>,
+        ) -> Result<crate::claude::MessagesResponse, crate::error::MicroClawError> {
+            Ok(crate::claude::MessagesResponse {
+                content: vec![crate::claude::ResponseContentBlock::Text {
+                    text: "hello from llm".into(),
+                }],
+                stop_reason: Some("end_turn".into()),
+                usage: None,
+            })
+        }
+
+        async fn send_message_stream(
+            &self,
+            _system: &str,
+            _messages: Vec<crate::claude::Message>,
+            _tools: Option<Vec<crate::claude::ToolDefinition>>,
+            text_tx: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+        ) -> Result<crate::claude::MessagesResponse, crate::error::MicroClawError> {
+            if let Some(tx) = text_tx {
+                let _ = tx.send("hello ".into());
+                let _ = tx.send("from llm".into());
+            }
+            self.send_message("", vec![], None).await
+        }
+    }
+
+    fn test_state() -> Arc<AppState> {
+        let mut cfg = Config {
+            telegram_bot_token: "tok".into(),
+            bot_username: "bot".into(),
+            llm_provider: "anthropic".into(),
+            api_key: "key".into(),
+            model: "claude-sonnet-4-5-20250929".into(),
+            llm_base_url: None,
+            max_tokens: 8192,
+            max_tool_iterations: 100,
+            max_history_messages: 50,
+            data_dir: "./microclaw.data".into(),
+            working_dir: "./tmp".into(),
+            openai_api_key: None,
+            timezone: "UTC".into(),
+            allowed_groups: vec![],
+            control_chat_ids: vec![],
+            max_session_messages: 40,
+            compact_keep_recent: 20,
+            whatsapp_access_token: None,
+            whatsapp_phone_number_id: None,
+            whatsapp_verify_token: None,
+            whatsapp_webhook_port: 8080,
+            discord_bot_token: None,
+            discord_allowed_channels: vec![],
+            show_thinking: false,
+            web_enabled: true,
+            web_host: "127.0.0.1".into(),
+            web_port: 3900,
+            web_auth_token: None,
+        };
+        let dir = std::env::temp_dir().join(format!("microclaw_webtest_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        cfg.data_dir = dir.to_string_lossy().to_string();
+        cfg.working_dir = dir.join("tmp").to_string_lossy().to_string();
+        let runtime_dir = cfg.runtime_data_dir();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        let db = Arc::new(Database::new(&runtime_dir).unwrap());
+        let bot = Bot::new("123456:TEST_TOKEN");
+        let state = AppState {
+            config: cfg.clone(),
+            bot: bot.clone(),
+            db: db.clone(),
+            memory: MemoryManager::new(&runtime_dir),
+            skills: SkillManager::from_skills_dir(&cfg.skills_data_dir()),
+            llm: Box::new(DummyLlm),
+            tools: ToolRegistry::new(&cfg, bot, db),
+        };
+        Arc::new(state)
+    }
+
+    #[tokio::test]
+    async fn test_send_stream_then_stream_done() {
+        let state = test_state();
+        let web_state = WebState {
+            app_state: state,
+            auth_token: None,
+            run_hub: RunHub::default(),
+            session_hub: SessionHub::default(),
+        };
+        let app = build_router(web_state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/send_stream")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"session_key":"main","sender_name":"u","message":"hi"}"#,
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let run_id = v.get("run_id").and_then(|x| x.as_str()).unwrap();
+
+        let req2 = Request::builder()
+            .method("GET")
+            .uri(format!("/api/stream?run_id={run_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("event: delta"));
+        assert!(text.contains("event: done"));
     }
 }

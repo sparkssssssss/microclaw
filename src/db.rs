@@ -8,6 +8,16 @@ pub struct Database {
     conn: Mutex<Connection>,
 }
 
+pub async fn call_blocking<T, F>(db: std::sync::Arc<Database>, f: F) -> Result<T, MicroClawError>
+where
+    T: Send + 'static,
+    F: FnOnce(&Database) -> Result<T, MicroClawError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || f(db.as_ref()))
+        .await
+        .map_err(|e| MicroClawError::ToolExecution(format!("DB task join error: {e}")))?
+}
+
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
     pub id: String,

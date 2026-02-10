@@ -4,9 +4,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use super::{auth_context_from_input, authorize_chat_access, schema_object, Tool, ToolResult};
+use super::{authorize_chat_access, schema_object, Tool, ToolResult};
+use crate::channel::enforce_channel_policy;
 use crate::claude::ToolDefinition;
-use crate::db::Database;
+use crate::db::{call_blocking, Database};
 
 fn compute_next_run(cron_expr: &str, tz_name: &str) -> Result<String, String> {
     let tz: chrono_tz::Tz = tz_name
@@ -19,26 +20,6 @@ fn compute_next_run(cron_expr: &str, tz_name: &str) -> Result<String, String> {
         .next()
         .ok_or_else(|| "No upcoming run found for this cron expression".to_string())?;
     Ok(next.to_rfc3339())
-}
-
-fn enforce_web_chat_scope(
-    db: &Database,
-    input: &serde_json::Value,
-    target_chat_id: i64,
-) -> Result<(), String> {
-    let Some(auth) = auth_context_from_input(input) else {
-        return Ok(());
-    };
-
-    let caller_is_web = matches!(
-        db.get_chat_type(auth.caller_chat_id),
-        Ok(Some(ref t)) if t == "web"
-    );
-    if caller_is_web && auth.caller_chat_id != target_chat_id {
-        return Err("Permission denied: web chats cannot operate on other chats".into());
-    }
-
-    Ok(())
 }
 
 // --- schedule_task ---
@@ -104,7 +85,7 @@ impl Tool for ScheduleTaskTool {
         if let Err(e) = authorize_chat_access(&input, chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_web_chat_scope(self.db.as_ref(), &input, chat_id) {
+        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, chat_id).await {
             return ToolResult::error(e);
         }
         let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
@@ -141,13 +122,21 @@ impl Tool for ScheduleTaskTool {
             _ => return ToolResult::error("schedule_type must be 'cron' or 'once'".into()),
         };
 
-        match self.db.create_scheduled_task(
-            chat_id,
-            prompt,
-            schedule_type,
-            schedule_value,
-            &next_run,
-        ) {
+        let prompt_owned = prompt.to_string();
+        let schedule_type_owned = schedule_type.to_string();
+        let schedule_value_owned = schedule_value.to_string();
+        let next_run_owned = next_run.clone();
+        match call_blocking(self.db.clone(), move |db| {
+            db.create_scheduled_task(
+                chat_id,
+                &prompt_owned,
+                &schedule_type_owned,
+                &schedule_value_owned,
+                &next_run_owned,
+            )
+        })
+        .await
+        {
             Ok(id) => ToolResult::success(format!(
                 "Task #{id} scheduled (tz: {tz_name}). Next run: {next_run}"
             )),
@@ -198,11 +187,11 @@ impl Tool for ListTasksTool {
         if let Err(e) = authorize_chat_access(&input, chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_web_chat_scope(self.db.as_ref(), &input, chat_id) {
+        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, chat_id).await {
             return ToolResult::error(e);
         }
 
-        match self.db.get_tasks_for_chat(chat_id) {
+        match call_blocking(self.db.clone(), move |db| db.get_tasks_for_chat(chat_id)).await {
             Ok(tasks) => {
                 if tasks.is_empty() {
                     return ToolResult::success("No scheduled tasks found for this chat.".into());
@@ -260,7 +249,8 @@ impl Tool for PauseTaskTool {
             Some(id) => id,
             None => return ToolResult::error("Missing required parameter: task_id".into()),
         };
-        let task = match self.db.get_task_by_id(task_id) {
+        let task = match call_blocking(self.db.clone(), move |db| db.get_task_by_id(task_id)).await
+        {
             Ok(Some(t)) => t,
             Ok(None) => return ToolResult::error(format!("Task #{task_id} not found.")),
             Err(e) => return ToolResult::error(format!("Failed to load task: {e}")),
@@ -268,11 +258,15 @@ impl Tool for PauseTaskTool {
         if let Err(e) = authorize_chat_access(&input, task.chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_web_chat_scope(self.db.as_ref(), &input, task.chat_id) {
+        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, task.chat_id).await {
             return ToolResult::error(e);
         }
 
-        match self.db.update_task_status(task_id, "paused") {
+        match call_blocking(self.db.clone(), move |db| {
+            db.update_task_status(task_id, "paused")
+        })
+        .await
+        {
             Ok(true) => ToolResult::success(format!("Task #{task_id} paused.")),
             Ok(false) => ToolResult::error(format!("Task #{task_id} not found.")),
             Err(e) => ToolResult::error(format!("Failed to pause task: {e}")),
@@ -319,7 +313,8 @@ impl Tool for ResumeTaskTool {
             Some(id) => id,
             None => return ToolResult::error("Missing required parameter: task_id".into()),
         };
-        let task = match self.db.get_task_by_id(task_id) {
+        let task = match call_blocking(self.db.clone(), move |db| db.get_task_by_id(task_id)).await
+        {
             Ok(Some(t)) => t,
             Ok(None) => return ToolResult::error(format!("Task #{task_id} not found.")),
             Err(e) => return ToolResult::error(format!("Failed to load task: {e}")),
@@ -327,11 +322,15 @@ impl Tool for ResumeTaskTool {
         if let Err(e) = authorize_chat_access(&input, task.chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_web_chat_scope(self.db.as_ref(), &input, task.chat_id) {
+        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, task.chat_id).await {
             return ToolResult::error(e);
         }
 
-        match self.db.update_task_status(task_id, "active") {
+        match call_blocking(self.db.clone(), move |db| {
+            db.update_task_status(task_id, "active")
+        })
+        .await
+        {
             Ok(true) => ToolResult::success(format!("Task #{task_id} resumed.")),
             Ok(false) => ToolResult::error(format!("Task #{task_id} not found.")),
             Err(e) => ToolResult::error(format!("Failed to resume task: {e}")),
@@ -378,7 +377,8 @@ impl Tool for CancelTaskTool {
             Some(id) => id,
             None => return ToolResult::error("Missing required parameter: task_id".into()),
         };
-        let task = match self.db.get_task_by_id(task_id) {
+        let task = match call_blocking(self.db.clone(), move |db| db.get_task_by_id(task_id)).await
+        {
             Ok(Some(t)) => t,
             Ok(None) => return ToolResult::error(format!("Task #{task_id} not found.")),
             Err(e) => return ToolResult::error(format!("Failed to load task: {e}")),
@@ -386,11 +386,15 @@ impl Tool for CancelTaskTool {
         if let Err(e) = authorize_chat_access(&input, task.chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_web_chat_scope(self.db.as_ref(), &input, task.chat_id) {
+        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, task.chat_id).await {
             return ToolResult::error(e);
         }
 
-        match self.db.update_task_status(task_id, "cancelled") {
+        match call_blocking(self.db.clone(), move |db| {
+            db.update_task_status(task_id, "cancelled")
+        })
+        .await
+        {
             Ok(true) => ToolResult::success(format!("Task #{task_id} cancelled.")),
             Ok(false) => ToolResult::error(format!("Task #{task_id} not found.")),
             Err(e) => ToolResult::error(format!("Failed to cancel task: {e}")),
@@ -441,7 +445,8 @@ impl Tool for GetTaskHistoryTool {
             Some(id) => id,
             None => return ToolResult::error("Missing required parameter: task_id".into()),
         };
-        let task = match self.db.get_task_by_id(task_id) {
+        let task = match call_blocking(self.db.clone(), move |db| db.get_task_by_id(task_id)).await
+        {
             Ok(Some(t)) => t,
             Ok(None) => return ToolResult::error(format!("Task #{task_id} not found.")),
             Err(e) => return ToolResult::error(format!("Failed to load task: {e}")),
@@ -449,12 +454,16 @@ impl Tool for GetTaskHistoryTool {
         if let Err(e) = authorize_chat_access(&input, task.chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_web_chat_scope(self.db.as_ref(), &input, task.chat_id) {
+        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, task.chat_id).await {
             return ToolResult::error(e);
         }
         let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
-        match self.db.get_task_run_logs(task_id, limit) {
+        match call_blocking(self.db.clone(), move |db| {
+            db.get_task_run_logs(task_id, limit)
+        })
+        .await
+        {
             Ok(logs) => {
                 if logs.is_empty() {
                     return ToolResult::success(format!(

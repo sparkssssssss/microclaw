@@ -8,6 +8,7 @@ use serenity::prelude::*;
 use tracing::{error, info};
 
 use crate::claude::Message as ClaudeMessage;
+use crate::db::call_blocking;
 use crate::db::StoredMessage;
 use crate::telegram::{archive_conversation, AppState};
 
@@ -40,7 +41,10 @@ impl EventHandler for Handler {
 
         // Handle /reset command
         if text.trim() == "/reset" {
-            let _ = self.app_state.db.delete_session(channel_id);
+            let _ = call_blocking(self.app_state.db.clone(), move |db| {
+                db.delete_session(channel_id)
+            })
+            .await;
             let _ = msg.channel_id.say(&ctx.http, "Session cleared.").await;
             return;
         }
@@ -54,7 +58,11 @@ impl EventHandler for Handler {
 
         // Handle /archive command
         if text.trim() == "/archive" {
-            if let Ok(Some((json, _))) = self.app_state.db.load_session(channel_id) {
+            if let Ok(Some((json, _))) = call_blocking(self.app_state.db.clone(), move |db| {
+                db.load_session(channel_id)
+            })
+            .await
+            {
                 let messages: Vec<ClaudeMessage> = serde_json::from_str(&json).unwrap_or_default();
                 if messages.is_empty() {
                     let _ = msg
@@ -82,11 +90,11 @@ impl EventHandler for Handler {
         }
 
         // Store the chat and message
-        let _ = self.app_state.db.upsert_chat(
-            channel_id,
-            Some(&format!("discord-{}", msg.channel_id.get())),
-            "private",
-        );
+        let title = format!("discord-{}", msg.channel_id.get());
+        let _ = call_blocking(self.app_state.db.clone(), move |db| {
+            db.upsert_chat(channel_id, Some(&title), "private")
+        })
+        .await;
 
         let stored = StoredMessage {
             id: msg.id.get().to_string(),
@@ -96,7 +104,10 @@ impl EventHandler for Handler {
             is_from_bot: false,
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
-        let _ = self.app_state.db.store_message(&stored);
+        let _ = call_blocking(self.app_state.db.clone(), move |db| {
+            db.store_message(&stored)
+        })
+        .await;
 
         // Determine if we should respond
         let should_respond = if msg.guild_id.is_some() {
@@ -152,7 +163,10 @@ impl EventHandler for Handler {
                         is_from_bot: true,
                         timestamp: chrono::Utc::now().to_rfc3339(),
                     };
-                    let _ = self.app_state.db.store_message(&bot_msg);
+                    let _ = call_blocking(self.app_state.db.clone(), move |db| {
+                        db.store_message(&bot_msg)
+                    })
+                    .await;
                 }
             }
             Err(e) => {

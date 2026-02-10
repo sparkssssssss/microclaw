@@ -6,3 +6,4 @@ microclaw.data/*
 !microclaw.data/skills/**
 website/
 tmp/
+web/node_modules/

@@ -50,7 +50,7 @@ pub enum MessageContent {
     Blocks(Vec<ContentBlock>),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MessagesRequest {
     pub model: String,
     pub max_tokens: u32,
@@ -58,6 +58,8 @@ pub struct MessagesRequest {
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,6 +221,7 @@ mod tests {
                 content: MessageContent::Text("hi".into()),
             }],
             tools: None,
+            stream: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["model"], "claude-sonnet-4-5-20250929");
@@ -238,6 +241,7 @@ mod tests {
                 description: "Run bash".into(),
                 input_schema: json!({"type": "object"}),
             }]),
+            stream: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(json["tools"].is_array());

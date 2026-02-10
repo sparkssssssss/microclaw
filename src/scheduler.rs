@@ -2,9 +2,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::Utc;
-use teloxide::prelude::*;
 use tracing::{error, info};
 
+use crate::channel::deliver_and_store_bot_message;
+use crate::db::call_blocking;
 use crate::telegram::AppState;
 
 pub fn spawn_scheduler(state: Arc<AppState>) {
@@ -19,7 +20,7 @@ pub fn spawn_scheduler(state: Arc<AppState>) {
 
 async fn run_due_tasks(state: &Arc<AppState>) {
     let now = Utc::now().to_rfc3339();
-    let tasks = match state.db.get_due_tasks(&now) {
+    let tasks = match call_blocking(state.db.clone(), move |db| db.get_due_tasks(&now)).await {
         Ok(t) => t,
         Err(e) => {
             error!("Scheduler: failed to query due tasks: {e}");
@@ -36,13 +37,6 @@ async fn run_due_tasks(state: &Arc<AppState>) {
         let started_at = Utc::now();
         let started_at_str = started_at.to_rfc3339();
 
-        let chat_type = state
-            .db
-            .get_chat_type(task.chat_id)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "private".into());
-
         // Run agent loop with the task prompt
         let (success, result_summary) = match crate::telegram::process_with_agent(
             state,
@@ -56,29 +50,14 @@ async fn run_due_tasks(state: &Arc<AppState>) {
         {
             Ok(response) => {
                 if !response.is_empty() {
-                    if chat_type == "web" {
-                        let bot_msg = crate::db::StoredMessage {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            chat_id: task.chat_id,
-                            sender_name: state.config.bot_username.clone(),
-                            content: response.clone(),
-                            is_from_bot: true,
-                            timestamp: chrono::Utc::now().to_rfc3339(),
-                        };
-                        let _ = state.db.store_message(&bot_msg);
-                    } else {
-                        crate::telegram::send_response(&state.bot, ChatId(task.chat_id), &response)
-                            .await;
-                        let bot_msg = crate::db::StoredMessage {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            chat_id: task.chat_id,
-                            sender_name: state.config.bot_username.clone(),
-                            content: response.clone(),
-                            is_from_bot: true,
-                            timestamp: chrono::Utc::now().to_rfc3339(),
-                        };
-                        let _ = state.db.store_message(&bot_msg);
-                    }
+                    let _ = deliver_and_store_bot_message(
+                        &state.bot,
+                        state.db.clone(),
+                        &state.config.bot_username,
+                        task.chat_id,
+                        &response,
+                    )
+                    .await;
                 }
                 let summary = if response.len() > 200 {
                     format!("{}...", &response[..response.floor_char_boundary(200)])
@@ -90,31 +69,14 @@ async fn run_due_tasks(state: &Arc<AppState>) {
             Err(e) => {
                 error!("Scheduler: task #{} failed: {e}", task.id);
                 let err_text = format!("Scheduled task #{} failed: {e}", task.id);
-                if chat_type == "web" {
-                    let bot_msg = crate::db::StoredMessage {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        chat_id: task.chat_id,
-                        sender_name: state.config.bot_username.clone(),
-                        content: err_text.clone(),
-                        is_from_bot: true,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                    };
-                    let _ = state.db.store_message(&bot_msg);
-                } else {
-                    let _ = state
-                        .bot
-                        .send_message(ChatId(task.chat_id), &err_text)
-                        .await;
-                    let bot_msg = crate::db::StoredMessage {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        chat_id: task.chat_id,
-                        sender_name: state.config.bot_username.clone(),
-                        content: err_text,
-                        is_from_bot: true,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                    };
-                    let _ = state.db.store_message(&bot_msg);
-                }
+                let _ = deliver_and_store_bot_message(
+                    &state.bot,
+                    state.db.clone(),
+                    &state.config.bot_username,
+                    task.chat_id,
+                    &err_text,
+                )
+                .await;
                 (false, Some(format!("Error: {e}")))
             }
         };
@@ -124,15 +86,23 @@ async fn run_due_tasks(state: &Arc<AppState>) {
         let duration_ms = (finished_at - started_at).num_milliseconds();
 
         // Log the task run
-        if let Err(e) = state.db.log_task_run(
-            task.id,
-            task.chat_id,
-            &started_at_str,
-            &finished_at_str,
-            duration_ms,
-            success,
-            result_summary.as_deref(),
-        ) {
+        let log_summary = result_summary.clone();
+        let started_for_log = started_at_str.clone();
+        let finished_for_log = finished_at_str.clone();
+        if let Err(e) = call_blocking(state.db.clone(), move |db| {
+            db.log_task_run(
+                task.id,
+                task.chat_id,
+                &started_for_log,
+                &finished_for_log,
+                duration_ms,
+                success,
+                log_summary.as_deref(),
+            )?;
+            Ok(())
+        })
+        .await
+        {
             error!("Scheduler: failed to log task run for #{}: {e}", task.id);
         }
 
@@ -150,10 +120,12 @@ async fn run_due_tasks(state: &Arc<AppState>) {
             None // one-shot
         };
 
-        if let Err(e) =
-            state
-                .db
-                .update_task_after_run(task.id, &started_at_str, next_run.as_deref())
+        let started_for_update = started_at_str.clone();
+        if let Err(e) = call_blocking(state.db.clone(), move |db| {
+            db.update_task_after_run(task.id, &started_for_update, next_run.as_deref())?;
+            Ok(())
+        })
+        .await
         {
             error!("Scheduler: failed to update task #{}: {e}", task.id);
         }

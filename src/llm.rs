@@ -1,6 +1,8 @@
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::warn;
 
 use std::collections::HashSet;
@@ -67,6 +69,80 @@ fn sanitize_messages(messages: Vec<Message>) -> Vec<Message> {
         .collect()
 }
 
+#[derive(Default)]
+struct SseEventParser {
+    pending: String,
+    data_lines: Vec<String>,
+}
+
+impl SseEventParser {
+    fn push_chunk(&mut self, chunk: &str) -> Vec<String> {
+        self.pending.push_str(chunk);
+        let mut events = Vec::new();
+
+        while let Some(pos) = self.pending.find('\n') {
+            let mut line = self.pending[..pos].to_string();
+            self.pending = self.pending[pos + 1..].to_string();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            if let Some(event_data) = self.handle_line(&line) {
+                events.push(event_data);
+            }
+        }
+
+        events
+    }
+
+    fn finish(&mut self) -> Vec<String> {
+        let mut events = Vec::new();
+        if !self.pending.is_empty() {
+            let mut line = std::mem::take(&mut self.pending);
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            if let Some(event_data) = self.handle_line(&line) {
+                events.push(event_data);
+            }
+        }
+        if let Some(event_data) = self.flush_event() {
+            events.push(event_data);
+        }
+        events
+    }
+
+    fn handle_line(&mut self, line: &str) -> Option<String> {
+        if line.is_empty() {
+            return self.flush_event();
+        }
+        if line.starts_with(':') {
+            return None;
+        }
+
+        let (field, value) = match line.split_once(':') {
+            Some((f, v)) => {
+                let v = v.strip_prefix(' ').unwrap_or(v);
+                (f, v)
+            }
+            None => (line, ""),
+        };
+
+        if field == "data" {
+            self.data_lines.push(value.to_string());
+        }
+        None
+    }
+
+    fn flush_event(&mut self) -> Option<String> {
+        if self.data_lines.is_empty() {
+            return None;
+        }
+        let data = self.data_lines.join("\n");
+        self.data_lines.clear();
+        Some(data)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Provider trait
 // ---------------------------------------------------------------------------
@@ -79,6 +155,24 @@ pub trait LlmProvider: Send + Sync {
         messages: Vec<Message>,
         tools: Option<Vec<ToolDefinition>>,
     ) -> Result<MessagesResponse, MicroClawError>;
+
+    async fn send_message_stream(
+        &self,
+        system: &str,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        text_tx: Option<&UnboundedSender<String>>,
+    ) -> Result<MessagesResponse, MicroClawError> {
+        let response = self.send_message(system, messages, tools).await?;
+        if let Some(tx) = text_tx {
+            for block in &response.content {
+                if let ResponseContentBlock::Text { text } = block {
+                    let _ = tx.send(text.clone());
+                }
+            }
+        }
+        Ok(response)
+    }
 }
 
 pub fn create_provider(config: &Config) -> Box<dyn LlmProvider> {
@@ -113,6 +207,357 @@ impl AnthropicProvider {
                 .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".into()),
         }
     }
+
+    async fn send_message_stream_single_pass(
+        &self,
+        request: &MessagesRequest,
+        text_tx: Option<&UnboundedSender<String>>,
+    ) -> Result<MessagesResponse, MicroClawError> {
+        let mut streamed_request = request.clone();
+        streamed_request.stream = Some(true);
+
+        let response = self
+            .http
+            .post(&self.base_url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&streamed_request)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            if let Ok(api_err) = serde_json::from_str::<AnthropicApiError>(&body) {
+                return Err(MicroClawError::LlmApi(format!(
+                    "{}: {}",
+                    api_err.error.error_type, api_err.error.message
+                )));
+            }
+            return Err(MicroClawError::LlmApi(format!("HTTP {status}: {body}")));
+        }
+
+        let mut byte_stream = response.bytes_stream();
+        let mut sse = SseEventParser::default();
+        let mut stop_reason: Option<String> = None;
+        let mut usage: Option<Usage> = None;
+        let mut text_blocks: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+        let mut tool_blocks: std::collections::HashMap<usize, StreamToolUseBlock> =
+            std::collections::HashMap::new();
+        let mut ordered_indexes: Vec<usize> = Vec::new();
+
+        'outer: while let Some(chunk_res) = byte_stream.next().await {
+            let chunk = match chunk_res {
+                Ok(c) => c,
+                Err(_) => break,
+            };
+            for data in sse.push_chunk(&String::from_utf8_lossy(&chunk)) {
+                if data == "[DONE]" {
+                    break 'outer;
+                }
+                process_anthropic_stream_event(
+                    &data,
+                    text_tx,
+                    &mut stop_reason,
+                    &mut usage,
+                    &mut text_blocks,
+                    &mut tool_blocks,
+                    &mut ordered_indexes,
+                );
+            }
+        }
+        for data in sse.finish() {
+            if data == "[DONE]" {
+                break;
+            }
+            process_anthropic_stream_event(
+                &data,
+                text_tx,
+                &mut stop_reason,
+                &mut usage,
+                &mut text_blocks,
+                &mut tool_blocks,
+                &mut ordered_indexes,
+            );
+        }
+
+        Ok(build_stream_response(
+            ordered_indexes,
+            text_blocks,
+            tool_blocks,
+            stop_reason,
+            usage,
+        ))
+    }
+}
+
+#[derive(Default)]
+struct StreamToolUseBlock {
+    id: String,
+    name: String,
+    input_json: String,
+}
+
+fn usage_from_json(v: &serde_json::Value) -> Option<Usage> {
+    let input = v.get("input_tokens").and_then(|n| n.as_u64())?;
+    let output = v
+        .get("output_tokens")
+        .and_then(|n| n.as_u64())
+        .or_else(|| v.get("completion_tokens").and_then(|n| n.as_u64()))
+        .unwrap_or(0);
+    Some(Usage {
+        input_tokens: u32::try_from(input).unwrap_or(u32::MAX),
+        output_tokens: u32::try_from(output).unwrap_or(u32::MAX),
+    })
+}
+
+fn process_anthropic_stream_event(
+    data: &str,
+    text_tx: Option<&UnboundedSender<String>>,
+    stop_reason: &mut Option<String>,
+    usage: &mut Option<Usage>,
+    text_blocks: &mut std::collections::HashMap<usize, String>,
+    tool_blocks: &mut std::collections::HashMap<usize, StreamToolUseBlock>,
+    ordered_indexes: &mut Vec<usize>,
+) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+        return;
+    };
+
+    let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+    match event_type {
+        "content_block_start" => {
+            if let Some(index) = v
+                .get("index")
+                .and_then(|i| i.as_u64())
+                .and_then(|i| usize::try_from(i).ok())
+            {
+                if !ordered_indexes.contains(&index) {
+                    ordered_indexes.push(index);
+                }
+                if let Some(block) = v.get("content_block") {
+                    match block.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            let text = block
+                                .get("text")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            text_blocks.insert(index, text);
+                        }
+                        Some("tool_use") => {
+                            let id = block
+                                .get("id")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let name = block
+                                .get("name")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let input =
+                                block.get("input").cloned().unwrap_or_else(|| json!({}));
+                            let input_json = if input.is_object()
+                                && input.as_object().is_some_and(|m| m.is_empty())
+                            {
+                                String::new()
+                            } else {
+                                serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string())
+                            };
+                            tool_blocks.insert(
+                                index,
+                                StreamToolUseBlock {
+                                    id,
+                                    name,
+                                    input_json,
+                                },
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        "content_block_delta" => {
+            let Some(index) = v
+                .get("index")
+                .and_then(|i| i.as_u64())
+                .and_then(|i| usize::try_from(i).ok())
+            else {
+                return;
+            };
+            let Some(delta) = v.get("delta") else {
+                return;
+            };
+            match delta.get("type").and_then(|t| t.as_str()) {
+                Some("text_delta") => {
+                    let piece = delta
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default();
+                    if !piece.is_empty() {
+                        text_blocks.entry(index).or_default().push_str(piece);
+                        if let Some(tx) = text_tx {
+                            let _ = tx.send(piece.to_string());
+                        }
+                    }
+                }
+                Some("input_json_delta") => {
+                    let piece = delta
+                        .get("partial_json")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default();
+                    if !piece.is_empty() {
+                        tool_blocks
+                            .entry(index)
+                            .or_default()
+                            .input_json
+                            .push_str(piece);
+                    }
+                }
+                _ => {}
+            }
+        }
+        "message_delta" => {
+            if let Some(reason) = v
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(|s| s.as_str())
+            {
+                *stop_reason = Some(reason.to_string());
+            }
+            if let Some(u) = v.get("usage") {
+                *usage = usage_from_json(u);
+            }
+        }
+        "message_start" => {
+            if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
+                *usage = usage_from_json(u);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn process_openai_stream_event(
+    data: &str,
+    text_tx: Option<&UnboundedSender<String>>,
+    text: &mut String,
+    stop_reason: &mut Option<String>,
+    usage: &mut Option<Usage>,
+    tool_calls: &mut std::collections::BTreeMap<usize, StreamToolUseBlock>,
+) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+        return;
+    };
+
+    if usage.is_none() {
+        *usage = v.get("usage").and_then(usage_from_json);
+    }
+
+    let Some(choice) = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+    else {
+        return;
+    };
+
+    if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
+        *stop_reason = Some(reason.to_string());
+    }
+
+    let Some(delta) = choice.get("delta") else {
+        return;
+    };
+
+    if let Some(piece) = delta.get("content").and_then(|t| t.as_str()) {
+        if !piece.is_empty() {
+            text.push_str(piece);
+            if let Some(tx) = text_tx {
+                let _ = tx.send(piece.to_string());
+            }
+        }
+    }
+
+    if let Some(tc_arr) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+        for tc in tc_arr {
+            let Some(index) = tc
+                .get("index")
+                .and_then(|i| i.as_u64())
+                .and_then(|i| usize::try_from(i).ok())
+            else {
+                continue;
+            };
+            let entry = tool_calls.entry(index).or_default();
+            if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                entry.id = id.to_string();
+            }
+            if let Some(function) = tc.get("function") {
+                if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
+                    entry.name = name.to_string();
+                }
+                if let Some(args) = function.get("arguments").and_then(|v| v.as_str()) {
+                    entry.input_json.push_str(args);
+                }
+            }
+        }
+    }
+}
+
+fn normalize_stop_reason(reason: Option<String>) -> Option<String> {
+    match reason.as_deref() {
+        Some("tool_use") | Some("tool_calls") => Some("tool_use".into()),
+        Some("max_tokens") | Some("length") => Some("max_tokens".into()),
+        Some("stop") | Some("end_turn") | None => Some("end_turn".into()),
+        Some(other) => Some(other.to_string()),
+    }
+}
+
+fn parse_tool_input(input_json: &str) -> serde_json::Value {
+    let trimmed = input_json.trim();
+    if trimmed.is_empty() {
+        return json!({});
+    }
+    serde_json::from_str(trimmed).unwrap_or_else(|_| json!({}))
+}
+
+fn build_stream_response(
+    ordered_indexes: Vec<usize>,
+    text_blocks: std::collections::HashMap<usize, String>,
+    tool_blocks: std::collections::HashMap<usize, StreamToolUseBlock>,
+    stop_reason: Option<String>,
+    usage: Option<Usage>,
+) -> MessagesResponse {
+    let mut content = Vec::new();
+    for index in ordered_indexes {
+        if let Some(text) = text_blocks.get(&index) {
+            if !text.is_empty() {
+                content.push(ResponseContentBlock::Text { text: text.clone() });
+            }
+        }
+        if let Some(tool) = tool_blocks.get(&index) {
+            content.push(ResponseContentBlock::ToolUse {
+                id: tool.id.clone(),
+                name: tool.name.clone(),
+                input: parse_tool_input(&tool.input_json),
+            });
+        }
+    }
+
+    if content.is_empty() {
+        content.push(ResponseContentBlock::Text {
+            text: String::new(),
+        });
+    }
+
+    MessagesResponse {
+        content,
+        stop_reason: normalize_stop_reason(stop_reason),
+        usage,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +588,7 @@ impl LlmProvider for AnthropicProvider {
             system: system.to_string(),
             messages,
             tools,
+            stream: None,
         };
 
         let mut retries = 0u32;
@@ -189,6 +635,26 @@ impl LlmProvider for AnthropicProvider {
             }
             return Err(MicroClawError::LlmApi(format!("HTTP {status}: {body}")));
         }
+    }
+
+    async fn send_message_stream(
+        &self,
+        system: &str,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        text_tx: Option<&UnboundedSender<String>>,
+    ) -> Result<MessagesResponse, MicroClawError> {
+        let messages = sanitize_messages(messages);
+        let request = MessagesRequest {
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+            system: system.to_string(),
+            messages,
+            tools,
+            stream: Some(true),
+        };
+
+        self.send_message_stream_single_pass(&request, text_tx).await
     }
 }
 
@@ -335,6 +801,111 @@ impl LlmProvider for OpenAiProvider {
             }
             return Err(MicroClawError::LlmApi(format!("HTTP {status}: {text}")));
         }
+    }
+
+    async fn send_message_stream(
+        &self,
+        system: &str,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        text_tx: Option<&UnboundedSender<String>>,
+    ) -> Result<MessagesResponse, MicroClawError> {
+        let oai_messages = translate_messages_to_oai(system, &messages);
+
+        let mut body = json!({
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": oai_messages,
+            "stream": true,
+        });
+
+        if let Some(ref tool_defs) = tools {
+            if !tool_defs.is_empty() {
+                body["tools"] = json!(translate_tools_to_oai(tool_defs));
+            }
+        }
+
+        let mut req = self
+            .http
+            .post(&self.chat_url)
+            .header("Content-Type", "application/json")
+            .json(&body);
+        if !self.api_key.trim().is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.api_key));
+        }
+        let response = req.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            if let Ok(err) = serde_json::from_str::<OaiErrorResponse>(&text) {
+                return Err(MicroClawError::LlmApi(err.error.message));
+            }
+            return Err(MicroClawError::LlmApi(format!("HTTP {status}: {text}")));
+        }
+
+        let mut byte_stream = response.bytes_stream();
+        let mut sse = SseEventParser::default();
+        let mut text = String::new();
+        let mut stop_reason: Option<String> = None;
+        let mut usage: Option<Usage> = None;
+        let mut tool_calls: std::collections::BTreeMap<usize, StreamToolUseBlock> =
+            std::collections::BTreeMap::new();
+
+        'outer: while let Some(chunk_res) = byte_stream.next().await {
+            let chunk = match chunk_res {
+                Ok(c) => c,
+                Err(_) => break,
+            };
+            for data in sse.push_chunk(&String::from_utf8_lossy(&chunk)) {
+                if data == "[DONE]" {
+                    break 'outer;
+                }
+                process_openai_stream_event(
+                    &data,
+                    text_tx,
+                    &mut text,
+                    &mut stop_reason,
+                    &mut usage,
+                    &mut tool_calls,
+                );
+            }
+        }
+        for data in sse.finish() {
+            if data == "[DONE]" {
+                break;
+            }
+            process_openai_stream_event(
+                &data,
+                text_tx,
+                &mut text,
+                &mut stop_reason,
+                &mut usage,
+                &mut tool_calls,
+            );
+        }
+
+        let mut content = Vec::new();
+        if !text.is_empty() {
+            content.push(ResponseContentBlock::Text { text });
+        }
+        for (_index, tool) in tool_calls {
+            content.push(ResponseContentBlock::ToolUse {
+                id: tool.id,
+                name: tool.name,
+                input: parse_tool_input(&tool.input_json),
+            });
+        }
+        if content.is_empty() {
+            content.push(ResponseContentBlock::Text {
+                text: String::new(),
+            });
+        }
+
+        Ok(MessagesResponse {
+            content,
+            stop_reason: normalize_stop_reason(stop_reason),
+            usage,
+        })
     }
 }
 
@@ -867,6 +1438,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_normalize_stop_reason_stream_variants() {
+        assert_eq!(
+            normalize_stop_reason(Some("tool_calls".into())).as_deref(),
+            Some("tool_use")
+        );
+        assert_eq!(
+            normalize_stop_reason(Some("length".into())).as_deref(),
+            Some("max_tokens")
+        );
+        assert_eq!(
+            normalize_stop_reason(Some("stop".into())).as_deref(),
+            Some("end_turn")
+        );
+    }
+
+    #[test]
+    fn test_build_stream_response_tool_json_parsing() {
+        let mut tool_blocks = std::collections::HashMap::new();
+        tool_blocks.insert(
+            0,
+            StreamToolUseBlock {
+                id: "call_1".into(),
+                name: "bash".into(),
+                input_json: r#"{"command":"ls","cwd":"/tmp"}"#.into(),
+            },
+        );
+        let resp = build_stream_response(
+            vec![0],
+            std::collections::HashMap::new(),
+            tool_blocks,
+            Some("tool_use".into()),
+            None,
+        );
+        assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
+        match &resp.content[0] {
+            ResponseContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "bash");
+                assert_eq!(input["command"], "ls");
+                assert_eq!(input["cwd"], "/tmp");
+            }
+            _ => panic!("Expected ToolUse"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // create_provider
     // -----------------------------------------------------------------------
@@ -1037,5 +1654,24 @@ mod tests {
         ];
         let sanitized = sanitize_messages(msgs);
         assert_eq!(sanitized.len(), 2);
+    }
+
+    #[test]
+    fn test_sse_event_parser_multiline_data() {
+        let mut parser = SseEventParser::default();
+        let events = parser.push_chunk(
+            "event: message\n: keep-alive\ndata: {\"type\":\"x\",\ndata: \"v\":1}\n\n",
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], "{\"type\":\"x\",\n\"v\":1}");
+    }
+
+    #[test]
+    fn test_sse_event_parser_finish_flushes_unterminated_event() {
+        let mut parser = SseEventParser::default();
+        let events = parser.push_chunk("data: hello");
+        assert!(events.is_empty());
+        let tail = parser.finish();
+        assert_eq!(tail, vec!["hello".to_string()]);
     }
 }

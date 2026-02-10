@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use serde_json::json;
 use teloxide::prelude::*;
 
-use super::{auth_context_from_input, authorize_chat_access, schema_object, Tool, ToolResult};
+use super::{authorize_chat_access, schema_object, Tool, ToolResult};
+use crate::channel::{deliver_and_store_bot_message, enforce_channel_policy};
 use crate::claude::ToolDefinition;
-use crate::db::{Database, StoredMessage};
+use crate::db::Database;
 
 pub struct SendMessageTool {
     bot: Bot,
@@ -21,10 +22,6 @@ impl SendMessageTool {
             db,
             bot_username,
         }
-    }
-
-    fn is_web_chat(&self, chat_id: i64) -> bool {
-        matches!(self.db.get_chat_type(chat_id), Ok(Some(ref t)) if t == "web")
     }
 }
 
@@ -68,33 +65,21 @@ impl Tool for SendMessageTool {
             return ToolResult::error(e);
         }
 
-        // Web callers are intentionally scoped to their own chat to avoid cross-channel actions.
-        if let Some(auth) = auth_context_from_input(&input) {
-            if self.is_web_chat(auth.caller_chat_id) && auth.caller_chat_id != chat_id {
-                return ToolResult::error(
-                    "Permission denied: web chats cannot send messages to other chats".into(),
-                );
-            }
+        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, chat_id).await {
+            return ToolResult::error(e);
         }
 
-        if self.is_web_chat(chat_id) {
-            let msg = StoredMessage {
-                id: uuid::Uuid::new_v4().to_string(),
-                chat_id,
-                sender_name: self.bot_username.clone(),
-                content: text.to_string(),
-                is_from_bot: true,
-                timestamp: chrono::Utc::now().to_rfc3339(),
-            };
-            match self.db.store_message(&msg) {
-                Ok(_) => ToolResult::success("Message sent successfully.".into()),
-                Err(e) => ToolResult::error(format!("Failed to send message: {e}")),
-            }
-        } else {
-            match self.bot.send_message(ChatId(chat_id), text).await {
-                Ok(_) => ToolResult::success("Message sent successfully.".into()),
-                Err(e) => ToolResult::error(format!("Failed to send message: {e}")),
-            }
+        match deliver_and_store_bot_message(
+            &self.bot,
+            self.db.clone(),
+            &self.bot_username,
+            chat_id,
+            text,
+        )
+        .await
+        {
+            Ok(_) => ToolResult::success("Message sent successfully.".into()),
+            Err(e) => ToolResult::error(e),
         }
     }
 }
@@ -178,7 +163,7 @@ mod tests {
         assert!(result.is_error);
         assert!(result
             .content
-            .contains("web chats cannot send messages to other chats"));
+            .contains("web chats cannot operate on other chats"));
         cleanup(&dir);
     }
 }

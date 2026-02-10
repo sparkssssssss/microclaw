@@ -314,26 +314,24 @@ fn prompt_model(
         println!("  {mark} {}. {model}", i + 1);
     }
 
-    loop {
-        print!("Model [{}]: ", default_model);
-        io::stdout().flush()?;
-        let mut buf = String::new();
-        io::stdin().read_line(&mut buf)?;
-        let trimmed = buf.trim();
+    print!("Model [{}]: ", default_model);
+    io::stdout().flush()?;
+    let mut buf = String::new();
+    io::stdin().read_line(&mut buf)?;
+    let trimmed = buf.trim();
 
-        if trimmed.eq_ignore_ascii_case("q") || trimmed.eq_ignore_ascii_case("quit") {
-            return Ok(None);
-        }
-        if trimmed.is_empty() {
-            return Ok(Some(default_model.to_string()));
-        }
-        if let Ok(n) = trimmed.parse::<usize>() {
-            if (1..=options.len()).contains(&n) {
-                return Ok(Some(options[n - 1].clone()));
-            }
-        }
-        return Ok(Some(trimmed.to_string()));
+    if trimmed.eq_ignore_ascii_case("q") || trimmed.eq_ignore_ascii_case("quit") {
+        return Ok(None);
     }
+    if trimmed.is_empty() {
+        return Ok(Some(default_model.to_string()));
+    }
+    if let Ok(n) = trimmed.parse::<usize>() {
+        if (1..=options.len()).contains(&n) {
+            return Ok(Some(options[n - 1].clone()));
+        }
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 fn save_config_yaml(path: &Path, config: &Config) -> Result<Option<PathBuf>, MicroClawError> {
@@ -446,11 +444,7 @@ pub fn run_config_wizard() -> Result<bool, MicroClawError> {
         None => return Ok(false),
     };
 
-    let api_default = if provider.eq_ignore_ascii_case("ollama") {
-        existing.api_key.clone()
-    } else {
-        existing.api_key.clone()
-    };
+    let api_default = existing.api_key.clone();
     let api_prompt = if provider.eq_ignore_ascii_case("ollama") {
         "LLM API key (optional for ollama)"
     } else {

@@ -8,6 +8,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use tracing::{error, info};
 
+use crate::db::call_blocking;
 use crate::db::StoredMessage;
 use crate::telegram::AppState;
 
@@ -156,7 +157,10 @@ async fn process_webhook(state: &WhatsAppState, payload: WebhookPayload) -> anyh
 
                 // Handle /reset command
                 if text.trim() == "/reset" {
-                    let _ = state.app_state.db.delete_session(chat_id);
+                    let _ = call_blocking(state.app_state.db.clone(), move |db| {
+                        db.delete_session(chat_id)
+                    })
+                    .await;
                     send_whatsapp_message(
                         &state.http_client,
                         &state.access_token,
@@ -169,10 +173,11 @@ async fn process_webhook(state: &WhatsAppState, payload: WebhookPayload) -> anyh
                 }
 
                 // Store message in DB
-                let _ = state
-                    .app_state
-                    .db
-                    .upsert_chat(chat_id, Some(&sender_name), "private");
+                let sender_name_for_chat = sender_name.clone();
+                let _ = call_blocking(state.app_state.db.clone(), move |db| {
+                    db.upsert_chat(chat_id, Some(&sender_name_for_chat), "private")
+                })
+                .await;
                 let stored = StoredMessage {
                     id: message.id.clone(),
                     chat_id,
@@ -181,7 +186,10 @@ async fn process_webhook(state: &WhatsAppState, payload: WebhookPayload) -> anyh
                     is_from_bot: false,
                     timestamp: chrono::Utc::now().to_rfc3339(),
                 };
-                let _ = state.app_state.db.store_message(&stored);
+                let _ = call_blocking(state.app_state.db.clone(), move |db| {
+                    db.store_message(&stored)
+                })
+                .await;
 
                 info!(
                     "WhatsApp message from {} ({}): {}",
@@ -221,7 +229,10 @@ async fn process_webhook(state: &WhatsAppState, payload: WebhookPayload) -> anyh
                                 is_from_bot: true,
                                 timestamp: chrono::Utc::now().to_rfc3339(),
                             };
-                            let _ = state.app_state.db.store_message(&bot_msg);
+                            let _ = call_blocking(state.app_state.db.clone(), move |db| {
+                                db.store_message(&bot_msg)
+                            })
+                            .await;
                         }
                     }
                     Err(e) => {
