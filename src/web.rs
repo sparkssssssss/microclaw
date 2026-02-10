@@ -1237,6 +1237,24 @@ mod tests {
     use teloxide::Bot;
     use tower::ServiceExt;
 
+    #[test]
+    fn test_web_assets_embedded() {
+        assert!(
+            WEB_ASSETS.get_file("index.html").is_some(),
+            "embedded web asset missing: index.html"
+        );
+        assert!(
+            WEB_ASSETS.get_file("icon.png").is_some(),
+            "embedded web asset missing: icon.png"
+        );
+        let assets_dir = WEB_ASSETS.get_dir("assets");
+        assert!(assets_dir.is_some(), "embedded web asset dir missing: assets");
+        assert!(
+            assets_dir.unwrap().files().next().is_some(),
+            "embedded web asset dir is empty: assets"
+        );
+    }
+
     struct DummyLlm;
 
     #[async_trait::async_trait]

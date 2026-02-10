@@ -83,20 +83,22 @@ export function SessionSidebar({
           </Text>
         </div>
         <div className="relative flex items-center gap-2">
-          {isDark ? (
-            <button
-              ref={themeButtonRef}
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation()
-                setThemeMenuOpen((v) => !v)
-              }}
-              aria-label="Change UI theme color"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[color:var(--mc-border-soft)] bg-[color:var(--mc-bg-panel)] text-slate-200 hover:brightness-110"
-            >
-              <span className="text-sm">🎨</span>
-            </button>
-          ) : null}
+          <button
+            ref={themeButtonRef}
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              setThemeMenuOpen((v) => !v)
+            }}
+            aria-label="Change UI theme color"
+            className={
+              isDark
+                ? 'inline-flex h-8 w-8 items-center justify-center rounded-md border border-[color:var(--mc-border-soft)] bg-[color:var(--mc-bg-panel)] text-slate-200 hover:brightness-110'
+                : 'inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
+            }
+          >
+            <span className="text-sm">🎨</span>
+          </button>
           <button
             type="button"
             onClick={(e) => {
@@ -112,10 +114,14 @@ export function SessionSidebar({
           >
             <span className="text-sm">{isDark ? '☀' : '☾'}</span>
           </button>
-          {isDark && themeMenuOpen ? (
+          {themeMenuOpen ? (
             <div
               ref={themeMenuRef}
-              className="absolute right-0 top-10 z-50 w-56 rounded-lg border border-[color:var(--mc-border-soft)] bg-[color:var(--mc-bg-sidebar)] p-2 shadow-xl"
+              className={
+                isDark
+                  ? 'absolute right-0 top-10 z-50 w-56 rounded-lg border border-[color:var(--mc-border-soft)] bg-[color:var(--mc-bg-sidebar)] p-2 shadow-xl'
+                  : 'absolute right-0 top-10 z-50 w-56 rounded-lg border border-slate-300 bg-white p-2 shadow-xl'
+              }
             >
               <Text size="1" color="gray">Theme</Text>
               <div className="mt-2 grid grid-cols-2 gap-1">
@@ -130,12 +136,17 @@ export function SessionSidebar({
                     }}
                     className={
                       uiTheme === theme.key
-                        ? 'flex items-center gap-2 rounded-md border border-[color:var(--mc-accent)] bg-[color:var(--mc-bg-panel)] px-2 py-1 text-left text-xs text-slate-100'
-                        : 'flex items-center gap-2 rounded-md border border-transparent px-2 py-1 text-left text-xs text-slate-300 hover:border-[color:var(--mc-border-soft)] hover:bg-[color:var(--mc-bg-panel)]'
+                        ? isDark
+                          ? 'flex items-center gap-2 rounded-md border border-[color:var(--mc-accent)] bg-[color:var(--mc-bg-panel)] px-2 py-1 text-left text-xs text-slate-100'
+                          : 'flex items-center gap-2 rounded-md border px-2 py-1 text-left text-xs text-slate-900'
+                        : isDark
+                          ? 'flex items-center gap-2 rounded-md border border-transparent px-2 py-1 text-left text-xs text-slate-300 hover:border-[color:var(--mc-border-soft)] hover:bg-[color:var(--mc-bg-panel)]'
+                          : 'flex items-center gap-2 rounded-md border border-transparent px-2 py-1 text-left text-xs text-slate-600 hover:border-slate-200 hover:bg-slate-50'
                     }
+                    style={!isDark && uiTheme === theme.key ? { borderColor: 'var(--mc-accent)', backgroundColor: 'color-mix(in srgb, var(--mc-accent) 12%, white)' } : undefined}
                   >
                     <span
-                      className="h-3 w-3 rounded-sm border border-white/20"
+                      className={isDark ? 'h-3 w-3 rounded-sm border border-white/20' : 'h-3 w-3 rounded-sm border border-slate-300'}
                       style={{ backgroundColor: theme.color }}
                       aria-hidden="true"
                     />
@@ -152,12 +163,8 @@ export function SessionSidebar({
         <button
           type="button"
           onClick={onNewSession}
-          className={
-            isDark
-              ? 'inline-flex h-9 w-full items-center justify-center rounded-md border border-transparent text-[15px] font-medium transition hover:brightness-110 active:brightness-95'
-              : 'inline-flex h-9 w-full items-center justify-center rounded-md border border-slate-300 bg-slate-900 text-[15px] font-medium text-white transition hover:bg-slate-800 active:bg-slate-700'
-          }
-          style={isDark ? { backgroundColor: 'var(--mc-accent)', color: '#06110f' } : undefined}
+          className="inline-flex h-9 w-full items-center justify-center rounded-md border border-transparent text-[15px] font-medium transition hover:brightness-110 active:brightness-95"
+          style={isDark ? { backgroundColor: 'var(--mc-accent)', color: '#06110f' } : { backgroundColor: 'var(--mc-accent)', color: '#ffffff' }}
         >
           New Session
         </button>
@@ -199,10 +206,18 @@ export function SessionSidebar({
                   selectedSessionKey === item.session_key
                     ? isDark
                       ? 'flex w-full flex-col items-start rounded-lg border border-[color:var(--mc-accent)] bg-[color:var(--mc-bg-panel)] px-3 py-2 text-left shadow-sm'
-                      : 'flex w-full flex-col items-start rounded-lg border border-slate-300 bg-white px-3 py-2 text-left shadow-sm'
+                      : 'flex w-full flex-col items-start rounded-lg border bg-white px-3 py-2 text-left shadow-sm'
                     : isDark
                       ? 'flex w-full flex-col items-start rounded-lg border border-transparent px-3 py-2 text-left text-slate-300 hover:border-[color:var(--mc-border-soft)] hover:bg-[color:var(--mc-bg-panel)]'
                       : 'flex w-full flex-col items-start rounded-lg border border-transparent px-3 py-2 text-left text-slate-600 hover:border-slate-200 hover:bg-white'
+                }
+                style={
+                  !isDark && selectedSessionKey === item.session_key
+                    ? {
+                        borderColor: 'color-mix(in srgb, var(--mc-accent) 36%, #94a3b8)',
+                        boxShadow: '0 4px 12px color-mix(in srgb, var(--mc-accent) 12%, transparent)',
+                      }
+                    : undefined
                 }
               >
                 <span className="max-w-[220px] truncate text-sm font-medium">{item.label}</span>

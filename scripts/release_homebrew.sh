@@ -62,6 +62,18 @@ if [ -f "web/package.json" ]; then
     npm --prefix web install
   fi
   npm --prefix web run build
+  test -f "web/dist/index.html" || {
+    echo "web/dist/index.html is missing after web build" >&2
+    exit 1
+  }
+  test -f "web/dist/icon.png" || {
+    echo "web/dist/icon.png is missing after web build" >&2
+    exit 1
+  }
+  if ! ls web/dist/assets/*.js >/dev/null 2>&1; then
+    echo "web/dist/assets/*.js is missing after web build" >&2
+    exit 1
+  fi
 fi
 
 # --- Bump patch version in Cargo.toml ---
