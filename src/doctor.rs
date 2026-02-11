@@ -426,7 +426,7 @@ fn check_mcp_dependencies(report: &mut DoctorReport) {
                     format!("mcp.{name}.endpoint"),
                     format!("MCP server '{name}' endpoint"),
                     CheckStatus::Pass,
-                    format!("{}", server.endpoint),
+                    server.endpoint.to_string(),
                     None,
                 );
             }
