@@ -8,6 +8,9 @@ pub struct SkillMetadata {
     pub dir_path: PathBuf,
     pub platforms: Vec<String>,
     pub deps: Vec<String>,
+    pub source: String,
+    pub version: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -21,6 +24,12 @@ struct SkillFrontmatter {
     deps: Vec<String>,
     #[serde(default)]
     compatibility: SkillCompatibility,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -166,7 +175,10 @@ impl SkillManager {
         }
         let mut output = format!("Available skills ({}):\n\n", skills.len());
         for skill in &skills {
-            output.push_str(&format!("• {} — {}\n", skill.name, skill.description));
+            output.push_str(&format!(
+                "• {} — {} [{}]\n",
+                skill.name, skill.description, skill.source
+            ));
         }
         output
     }
@@ -333,6 +345,19 @@ fn parse_skill_md(content: &str, dir_path: &std::path::Path) -> Option<(SkillMet
             dir_path: dir_path.to_path_buf(),
             platforms,
             deps,
+            source: fm
+                .source
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "local".to_string()),
+            version: fm
+                .version
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            updated_at: fm
+                .updated_at
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
         },
         body,
     ))
@@ -360,6 +385,7 @@ Use this skill to convert documents.
         assert_eq!(meta.description, "Convert documents to PDF");
         assert_eq!(meta.platforms, vec!["darwin", "linux"]);
         assert_eq!(meta.deps, vec!["pandoc"]);
+        assert_eq!(meta.source, "local");
         assert!(body.contains("Use this skill"));
     }
 

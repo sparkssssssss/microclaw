@@ -35,6 +35,40 @@ function Select-AssetUrl([object]$release, [string]$arch) {
   return $null
 }
 
+function Path-Contains([string]$pathValue, [string]$dir) {
+  if ([string]::IsNullOrWhiteSpace($pathValue)) { return $false }
+  $needle = $dir.Trim().TrimEnd('\\').ToLowerInvariant()
+  foreach ($part in $pathValue.Split(';')) {
+    if ([string]::IsNullOrWhiteSpace($part)) { continue }
+    if ($part.Trim().TrimEnd('\\').ToLowerInvariant() -eq $needle) {
+      return $true
+    }
+  }
+  return $false
+}
+
+function Ensure-UserPathContains([string]$dir) {
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if (Path-Contains $userPath $dir) {
+    return $false
+  }
+
+  $newPath = if ([string]::IsNullOrWhiteSpace($userPath)) {
+    $dir
+  } else {
+    "$userPath;$dir"
+  }
+
+  [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+
+  # Also update current process PATH so this shell can find it immediately.
+  if (-not (Path-Contains $env:Path $dir)) {
+    $env:Path = "$env:Path;$dir"
+  }
+
+  return $true
+}
+
 $arch = Resolve-Arch
 Write-Info "Installing microclaw for windows/$arch..."
 
@@ -59,9 +93,28 @@ try {
 
   $targetPath = Join-Path $InstallDir $BinName
   Copy-Item -Path $bin.FullName -Destination $targetPath -Force
+
+  $pathUpdated = Ensure-UserPathContains $InstallDir
+
   Write-Info "Installed microclaw to: $targetPath"
-  Write-Info "Ensure '$InstallDir' is in your PATH."
-  Write-Info "Run: microclaw help"
+  if ($pathUpdated) {
+    Write-Info "Added '$InstallDir' to your user PATH."
+    Write-Info "Open a new terminal if command lookup does not refresh immediately."
+  } else {
+    Write-Info "PATH already contains '$InstallDir'."
+  }
+
+  if (Get-Command microclaw -ErrorAction SilentlyContinue) {
+    Write-Info "Run: microclaw help"
+  } else {
+    Write-Info "If 'microclaw' is not found, open a new terminal and run: microclaw help"
+  }
+
+  if (-not (Get-Command agent-browser.cmd -ErrorAction SilentlyContinue) -and -not (Get-Command agent-browser -ErrorAction SilentlyContinue)) {
+    Write-Info "Optional: install browser automation support with:"
+    Write-Info "  npm install -g agent-browser"
+    Write-Info "  agent-browser install"
+  }
 } finally {
   Remove-Item -Recurse -Force $tmpDir.FullName -ErrorAction SilentlyContinue
 }

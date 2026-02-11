@@ -85,6 +85,7 @@ Telegram 消息
 | `export_chat` | 导出聊天记录为 markdown |
 | `sub_agent` | 委派子任务给有限制工具集的并行代理 |
 | `activate_skill` | 激活技能以加载专业指令 |
+| `sync_skills` | 从外部技能仓库（如 vercel-labs/skills）同步技能并规范化本地 frontmatter |
 | `todo_read` | 读取当前聊天的任务/计划列表 |
 | `todo_write` | 创建或更新聊天的任务/计划列表 |
 

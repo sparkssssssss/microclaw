@@ -86,6 +86,7 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 | `export_chat` | Export chat history to markdown |
 | `sub_agent` | Delegate a sub-task to a parallel agent with restricted tools |
 | `activate_skill` | Activate an agent skill to load specialized instructions |
+| `sync_skills` | Sync a skill from external registry (e.g. vercel-labs/skills) and normalize local frontmatter |
 | `todo_read` | Read the current task/plan list for a chat |
 | `todo_write` | Create or update the task/plan list for a chat |
 

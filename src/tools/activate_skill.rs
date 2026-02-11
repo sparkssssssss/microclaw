@@ -54,6 +54,13 @@ impl Tool for ActivateSkillTool {
                 let mut result = format!("# Skill: {}\n\n", meta.name);
                 result.push_str(&format!("Description: {}\n", meta.description));
                 result.push_str(&format!("Skill directory: {}\n", meta.dir_path.display()));
+                result.push_str(&format!("Source: {}\n", meta.source));
+                if let Some(version) = &meta.version {
+                    result.push_str(&format!("Version: {}\n", version));
+                }
+                if let Some(updated_at) = &meta.updated_at {
+                    result.push_str(&format!("Updated at: {}\n", updated_at));
+                }
                 if !meta.platforms.is_empty() {
                     result.push_str(&format!("Platforms: {}\n", meta.platforms.join(", ")));
                 }

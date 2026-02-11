@@ -13,13 +13,15 @@ pub mod read_file;
 pub mod schedule;
 pub mod send_message;
 pub mod sub_agent;
+pub mod sync_skills;
 pub mod todo;
 pub mod web_fetch;
 pub mod web_html;
 pub mod web_search;
 pub mod write_file;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 use std::{path::Path, path::PathBuf, time::Instant};
 
 use async_trait::async_trait;
@@ -73,6 +75,74 @@ impl ToolResult {
         self.error_type = Some(error_type.into());
         self
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolRisk {
+    Low,
+    Medium,
+    High,
+}
+
+impl ToolRisk {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolRisk::Low => "low",
+            ToolRisk::Medium => "medium",
+            ToolRisk::High => "high",
+        }
+    }
+}
+
+pub fn tool_risk(name: &str) -> ToolRisk {
+    match name {
+        "bash" => ToolRisk::High,
+        "write_file"
+        | "edit_file"
+        | "write_memory"
+        | "send_message"
+        | "sync_skills"
+        | "schedule_task"
+        | "pause_scheduled_task"
+        | "resume_scheduled_task"
+        | "cancel_scheduled_task" => ToolRisk::Medium,
+        _ => ToolRisk::Low,
+    }
+}
+
+const APPROVAL_CONTEXT_KEY: &str = "__microclaw_approval";
+
+fn approval_token_from_input(input: &serde_json::Value) -> Option<String> {
+    input
+        .get(APPROVAL_CONTEXT_KEY)
+        .and_then(|v| v.get("token"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn issue_approval_token() -> String {
+    uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect()
+}
+
+fn approval_key(auth: &ToolAuthContext, tool_name: &str) -> String {
+    format!(
+        "{}:{}:{}",
+        auth.caller_channel, auth.caller_chat_id, tool_name
+    )
+}
+
+fn pending_approvals() -> &'static std::sync::Mutex<HashMap<String, String>> {
+    static PENDING: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
+    PENDING.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn requires_high_risk_approval(name: &str, auth: &ToolAuthContext) -> bool {
+    tool_risk(name) == ToolRisk::High && (auth.caller_channel == "web" || auth.is_control_chat())
 }
 
 #[derive(Clone, Debug)]
@@ -266,6 +336,7 @@ impl ToolRegistry {
             Box::new(export_chat::ExportChatTool::new(db, &config.data_dir)),
             Box::new(sub_agent::SubAgentTool::new(config)),
             Box::new(activate_skill::ActivateSkillTool::new(&skills_data_dir)),
+            Box::new(sync_skills::SyncSkillsTool::new(&skills_data_dir)),
             Box::new(todo::TodoReadTool::new(&config.data_dir)),
             Box::new(todo::TodoWriteTool::new(&config.data_dir)),
         ];
@@ -350,6 +421,41 @@ impl ToolRegistry {
         input: serde_json::Value,
         auth: &ToolAuthContext,
     ) -> ToolResult {
+        if requires_high_risk_approval(name, auth) {
+            let provided = approval_token_from_input(&input);
+            let key = approval_key(auth, name);
+            let mut pending = pending_approvals()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match provided {
+                Some(token) => {
+                    let valid = pending.get(&key).map(|t| t == &token).unwrap_or(false);
+                    if valid {
+                        pending.remove(&key);
+                    } else {
+                        let replacement = issue_approval_token();
+                        pending.insert(key, replacement.clone());
+                        return ToolResult::error(format!(
+                            "Approval token invalid or expired for high-risk tool '{name}' (risk: {}). Re-run with __microclaw_approval.token=\"{}\".",
+                            tool_risk(name).as_str(),
+                            replacement
+                        ))
+                        .with_error_type("approval_required");
+                    }
+                }
+                None => {
+                    let token = issue_approval_token();
+                    pending.insert(key, token.clone());
+                    return ToolResult::error(format!(
+                        "Approval required for high-risk tool '{name}' (risk: {}). Re-run the same tool with __microclaw_approval.token=\"{}\" to confirm.",
+                        tool_risk(name).as_str(),
+                        token
+                    ))
+                    .with_error_type("approval_required");
+                }
+            }
+        }
+
         let input = inject_auth_context(input, auth);
         self.execute(name, input).await
     }
@@ -469,5 +575,111 @@ mod tests {
             dir,
             std::path::PathBuf::from("/tmp/work/chat/discord/neg100123")
         );
+    }
+
+    struct DummyTool {
+        tool_name: String,
+    }
+
+    #[async_trait]
+    impl Tool for DummyTool {
+        fn name(&self) -> &str {
+            &self.tool_name
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.tool_name.clone(),
+                description: "dummy".into(),
+                input_schema: schema_object(json!({}), &[]),
+            }
+        }
+
+        async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+            ToolResult::success("ok".into())
+        }
+    }
+
+    fn extract_token(msg: &str) -> String {
+        let marker = "__microclaw_approval.token=\"";
+        let start = msg.find(marker).unwrap() + marker.len();
+        let rest = &msg[start..];
+        rest.split('"').next().unwrap().to_string()
+    }
+
+    #[test]
+    fn test_tool_risk_levels() {
+        assert_eq!(tool_risk("bash"), ToolRisk::High);
+        assert_eq!(tool_risk("write_file"), ToolRisk::Medium);
+        assert_eq!(tool_risk("pause_scheduled_task"), ToolRisk::Medium);
+        assert_eq!(tool_risk("sync_skills"), ToolRisk::Medium);
+        assert_eq!(tool_risk("read_file"), ToolRisk::Low);
+    }
+
+    #[tokio::test]
+    async fn test_high_risk_tool_requires_second_approval_on_web() {
+        let registry = ToolRegistry {
+            tools: vec![Box::new(DummyTool {
+                tool_name: "bash".into(),
+            })],
+        };
+        let auth = ToolAuthContext {
+            caller_channel: "web".into(),
+            caller_chat_id: 1,
+            control_chat_ids: vec![],
+        };
+
+        let first = registry.execute_with_auth("bash", json!({}), &auth).await;
+        assert!(first.is_error);
+        assert_eq!(first.error_type.as_deref(), Some("approval_required"));
+        let token = extract_token(&first.content);
+
+        let second = registry
+            .execute_with_auth(
+                "bash",
+                json!({"__microclaw_approval": {"token": token}}),
+                &auth,
+            )
+            .await;
+        assert!(!second.is_error);
+        assert_eq!(second.content, "ok");
+    }
+
+    #[tokio::test]
+    async fn test_high_risk_tool_requires_second_approval_on_control_chat() {
+        let registry = ToolRegistry {
+            tools: vec![Box::new(DummyTool {
+                tool_name: "bash".into(),
+            })],
+        };
+        let auth = ToolAuthContext {
+            caller_channel: "telegram".into(),
+            caller_chat_id: 123,
+            control_chat_ids: vec![123],
+        };
+
+        let first = registry.execute_with_auth("bash", json!({}), &auth).await;
+        assert!(first.is_error);
+        assert_eq!(first.error_type.as_deref(), Some("approval_required"));
+    }
+
+    #[tokio::test]
+    async fn test_medium_risk_tool_no_second_approval() {
+        let registry = ToolRegistry {
+            tools: vec![Box::new(DummyTool {
+                tool_name: "write_file".into(),
+            })],
+        };
+        let auth = ToolAuthContext {
+            caller_channel: "web".into(),
+            caller_chat_id: 1,
+            control_chat_ids: vec![],
+        };
+
+        let result = registry
+            .execute_with_auth("write_file", json!({}), &auth)
+            .await;
+        assert!(!result.is_error);
+        assert_eq!(result.content, "ok");
     }
 }
