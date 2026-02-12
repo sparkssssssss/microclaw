@@ -1,31 +1,38 @@
-name: Build for Ubuntu 20.04
+name: Build Static Binary
 
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # 允许手动点击按钮触发
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   build:
-    # 关键点：强制指定使用 ubuntu-20.04
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v3
 
-    - name: Update apt and install dependencies
+    - name: Install Rust Toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-unknown-linux-musl
+
+    - name: Install Musl Tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libssl-dev pkg-config
+        sudo apt-get install -y musl-tools libssl-dev pkg-config
 
-    - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Build
-      run: cargo build --release
+    - name: Build with Musl (Static Linking)
+      # 这里使用 musl target，并且通过 vendor feature (如果有) 确保 openssl 也静态编译
+      # 如果项目没有 openssl feature，cargo 会尝试静态链接系统库
+      run: |
+        cargo build --release --target x86_64-unknown-linux-musl
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: microclaw-ubuntu20.04
-        path: target/release/microclaw
+        name: microclaw-static-linux
+        path: target/x86_64-unknown-linux-musl/release/microclaw
