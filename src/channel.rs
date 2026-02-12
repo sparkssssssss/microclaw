@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use teloxide::prelude::*;
 
+use crate::channels::delivery::{send_discord_text, send_telegram_text, send_whatsapp_text};
 use crate::config::Config;
 use crate::db::{call_blocking, Database, StoredMessage};
 use crate::tools::auth_context_from_input;
@@ -121,6 +122,7 @@ pub fn session_source_for_chat(chat_type: &str, chat_title: Option<&str>) -> Str
 
     chat_type.to_string()
 }
+
 pub async fn is_web_chat(db: Arc<Database>, chat_id: i64) -> bool {
     get_chat_routing(db, chat_id)
         .await
@@ -146,122 +148,6 @@ pub async fn enforce_channel_policy(
     Ok(())
 }
 
-fn split_text(text: &str, max_len: usize) -> Vec<String> {
-    if text.len() <= max_len {
-        return vec![text.to_string()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        let chunk_len = if remaining.len() <= max_len {
-            remaining.len()
-        } else {
-            remaining[..max_len].rfind('\n').unwrap_or(max_len)
-        };
-        chunks.push(remaining[..chunk_len].to_string());
-        remaining = &remaining[chunk_len..];
-        if remaining.starts_with('\n') {
-            remaining = &remaining[1..];
-        }
-    }
-    chunks
-}
-
-async fn send_telegram_text(bot: &Bot, chat_id: i64, text: &str) -> Result<(), String> {
-    crate::telegram::send_response(bot, ChatId(chat_id), text).await;
-    Ok(())
-}
-
-async fn send_discord_text(
-    config: Option<&Config>,
-    chat_id: i64,
-    text: &str,
-) -> Result<(), String> {
-    let cfg = config.ok_or_else(|| "send_message config unavailable".to_string())?;
-    let token = cfg
-        .discord_bot_token
-        .as_deref()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| "discord_bot_token not configured".to_string())?;
-
-    let client = reqwest::Client::new();
-    let url = format!("https://discord.com/api/v10/channels/{chat_id}/messages");
-
-    for chunk in split_text(text, 2000) {
-        let body = serde_json::json!({ "content": chunk });
-        let resp = client
-            .post(&url)
-            .header(reqwest::header::AUTHORIZATION, format!("Bot {token}"))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to send Discord message: {e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!(
-                "Failed to send Discord message: HTTP {status} {}",
-                body.chars().take(300).collect::<String>()
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-async fn send_whatsapp_text(
-    config: Option<&Config>,
-    chat_id: i64,
-    text: &str,
-) -> Result<(), String> {
-    let cfg = config.ok_or_else(|| "send_message config unavailable".to_string())?;
-    let access_token = cfg
-        .whatsapp_access_token
-        .as_deref()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| "whatsapp_access_token not configured".to_string())?;
-    let phone_number_id = cfg
-        .whatsapp_phone_number_id
-        .as_deref()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| "whatsapp_phone_number_id not configured".to_string())?;
-
-    let client = reqwest::Client::new();
-    let url = format!("https://graph.facebook.com/v23.0/{phone_number_id}/messages");
-    let to = chat_id.to_string();
-
-    for chunk in split_text(text, 4096) {
-        let body = serde_json::json!({
-            "messaging_product": "whatsapp",
-            "to": to,
-            "text": { "body": chunk }
-        });
-
-        let resp = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {access_token}"))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to send WhatsApp message: {e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!(
-                "Failed to send WhatsApp message: HTTP {status} {}",
-                body.chars().take(300).collect::<String>()
-            ));
-        }
-    }
-
-    Ok(())
-}
-
 pub async fn deliver_and_store_bot_message(
     telegram_bot: Option<&Bot>,
     config: Option<&Config>,
@@ -281,10 +167,12 @@ pub async fn deliver_and_store_bot_message(
             send_telegram_text(bot, chat_id, text).await?;
         }
         ChatChannel::Discord => {
-            send_discord_text(config, chat_id, text).await?;
+            let cfg = config.ok_or_else(|| "send_message config unavailable".to_string())?;
+            send_discord_text(cfg, chat_id, text).await?;
         }
         ChatChannel::WhatsApp => {
-            send_whatsapp_text(config, chat_id, text).await?;
+            let cfg = config.ok_or_else(|| "send_message config unavailable".to_string())?;
+            send_whatsapp_text(cfg, chat_id, text).await?;
         }
     }
 
