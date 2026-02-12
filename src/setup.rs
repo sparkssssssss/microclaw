@@ -16,6 +16,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::DefaultTerminal;
 
+use crate::codex_auth::{
+    is_openai_codex_provider, provider_allows_empty_api_key, resolve_openai_codex_auth,
+};
 use crate::error::MicroClawError;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +43,13 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         protocol: ProviderProtocol::OpenAiCompat,
         default_base_url: "https://api.openai.com/v1",
         models: &["gpt-5.2", "gpt-5", "gpt-5-mini"],
+    },
+    ProviderPreset {
+        id: "openai-codex",
+        label: "OpenAI Codex (ChatGPT subscription OAuth)",
+        protocol: ProviderProtocol::OpenAiCompat,
+        default_base_url: "https://chatgpt.com/backend-api",
+        models: &["gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.1-codex"],
     },
     ProviderPreset {
         id: "openrouter",
@@ -554,7 +564,9 @@ impl SetupApp {
 
     fn validate_local(&self) -> Result<(), MicroClawError> {
         for field in &self.fields {
-            if field.key == "LLM_API_KEY" && self.field_value("LLM_PROVIDER") == "ollama" {
+            if field.key == "LLM_API_KEY"
+                && provider_allows_empty_api_key(&self.field_value("LLM_PROVIDER"))
+            {
                 continue;
             }
             if field.required && field.value.trim().is_empty() {
@@ -646,7 +658,13 @@ impl SetupApp {
             .trim_start_matches('@')
             .to_string();
         let provider = self.field_value("LLM_PROVIDER").to_lowercase();
-        let api_key = self.field_value("LLM_API_KEY");
+        let api_key_input = self.field_value("LLM_API_KEY");
+        let (api_key, codex_account_id) = if is_openai_codex_provider(&provider) {
+            let auth = resolve_openai_codex_auth(&api_key_input)?;
+            (auth.bearer_token, auth.account_id)
+        } else {
+            (api_key_input, None)
+        };
         let base_url = self.field_value("LLM_BASE_URL");
         let model = self.field_value("LLM_MODEL");
         std::thread::spawn(move || {
@@ -658,6 +676,7 @@ impl SetupApp {
                 &api_key,
                 &base_url,
                 &model,
+                codex_account_id.as_deref(),
             )
         })
         .join()
@@ -987,6 +1006,7 @@ fn perform_online_validation(
     api_key: &str,
     base_url: &str,
     model: &str,
+    codex_account_id: Option<&str>,
 ) -> Result<Vec<String>, MicroClawError> {
     let mut checks = Vec::new();
     let client = reqwest::blocking::Client::builder()
@@ -1073,31 +1093,43 @@ fn perform_online_validation(
         }
         checks.push(format!("LLM OK (anthropic, model={model})"));
     } else {
-        let mut base = if base_url.is_empty() {
-            preset
-                .map(|p| p.default_base_url)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("https://api.openai.com/v1")
-                .to_string()
+        let base = resolve_openai_compat_validation_base(provider, base_url, preset);
+        let resp = if is_openai_codex_provider(provider) {
+            let body = serde_json::json!({
+                "model": model,
+                "input": [{"type":"message","role":"user","content":"hi"}],
+                "instructions": "You are a helpful assistant.",
+                "store": false,
+                "stream": true,
+            });
+            let mut req = client
+                .post(format!("{}/responses", base.trim_end_matches('/')))
+                .header("content-type", "application/json")
+                .body(body.to_string());
+            if !api_key.trim().is_empty() {
+                req = req.bearer_auth(api_key);
+            }
+            if let Some(account_id) = codex_account_id {
+                if !account_id.trim().is_empty() {
+                    req = req.header("ChatGPT-Account-ID", account_id.trim());
+                }
+            }
+            req.send()?
         } else {
-            base_url.trim_end_matches('/').to_string()
+            let body = serde_json::json!({
+                "model": model,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}]
+            });
+            let mut req = client
+                .post(format!("{}/chat/completions", base.trim_end_matches('/')))
+                .header("content-type", "application/json")
+                .body(body.to_string());
+            if !api_key.trim().is_empty() {
+                req = req.bearer_auth(api_key);
+            }
+            req.send()?
         };
-        if !base.ends_with("/v1") {
-            base = format!("{}/v1", base.trim_end_matches('/'));
-        }
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "hi"}]
-        });
-        let mut req = client
-            .post(format!("{base}/chat/completions"))
-            .header("content-type", "application/json")
-            .body(body.to_string());
-        if !api_key.trim().is_empty() {
-            req = req.bearer_auth(api_key);
-        }
-        let resp = req.send()?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().unwrap_or_default();
@@ -1118,6 +1150,39 @@ fn perform_online_validation(
     }
 
     Ok(checks)
+}
+
+fn resolve_openai_compat_validation_base(
+    provider: &str,
+    base_url: &str,
+    preset: Option<&ProviderPreset>,
+) -> String {
+    let trimmed = if base_url.is_empty() {
+        preset
+            .map(|p| p.default_base_url)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("https://api.openai.com/v1")
+            .trim_end_matches('/')
+            .to_string()
+    } else {
+        base_url.trim_end_matches('/').to_string()
+    };
+
+    if is_openai_codex_provider(provider) {
+        if trimmed.eq_ignore_ascii_case("https://api.openai.com/v1") {
+            return "https://chatgpt.com/backend-api/codex".to_string();
+        }
+        if trimmed.eq_ignore_ascii_case("https://chatgpt.com/backend-api") {
+            return "https://chatgpt.com/backend-api/codex".to_string();
+        }
+        return trimmed;
+    }
+
+    if trimmed.ends_with("/v1") {
+        trimmed
+    } else {
+        format!("{}/v1", trimmed)
+    }
 }
 
 fn mask_secret(s: &str) -> String {
@@ -1225,7 +1290,7 @@ fn save_config_yaml(
     yaml.push_str("web_enabled: true\n\n");
 
     yaml.push_str(
-        "# LLM provider (anthropic, ollama, openai, openrouter, deepseek, google, etc.)\n",
+        "# LLM provider (anthropic, openai-codex, ollama, openai, openrouter, deepseek, google, etc.)\n",
     );
     yaml.push_str(&format!("llm_provider: \"{}\"\n", get("LLM_PROVIDER")));
     yaml.push_str("# API key for LLM provider\n");
@@ -1709,5 +1774,23 @@ mod tests {
         assert!(s.contains("discord_bot_token: \"discord_token_123\""));
 
         let _ = fs::remove_file(&yaml_path);
+    }
+
+    #[test]
+    fn test_resolve_openai_compat_validation_base_codex() {
+        let base = resolve_openai_compat_validation_base("openai-codex", "", None);
+        assert_eq!(base, "https://chatgpt.com/backend-api/codex");
+        let legacy = resolve_openai_compat_validation_base(
+            "openai-codex",
+            "https://chatgpt.com/backend-api",
+            None,
+        );
+        assert_eq!(legacy, "https://chatgpt.com/backend-api/codex");
+    }
+
+    #[test]
+    fn test_resolve_openai_compat_validation_base_openai() {
+        let base = resolve_openai_compat_validation_base("openai", "https://api.openai.com", None);
+        assert_eq!(base, "https://api.openai.com/v1");
     }
 }

@@ -299,6 +299,7 @@ microclaw setup
 
 向导内置 provider 预设：
 - `openai`
+- `openai-codex`（ChatGPT/Codex 订阅 OAuth，先运行 `codex login`）
 - `openrouter`
 - `anthropic`
 - `ollama`
@@ -319,6 +320,8 @@ microclaw setup
 - `custom`（手动填写 provider/model/base URL）
 
 对于 Ollama：`llm_base_url` 默认是 `http://127.0.0.1:11434/v1`，`api_key` 可留空，交互式配置会尝试自动发现本地已安装模型。
+
+对于 `openai-codex`：请先运行 `codex login`。MicroClaw 会读取 `~/.codex/auth.json`（或 `$CODEX_HOME/auth.json`）里的 OAuth 凭据。默认 base URL 是 `https://chatgpt.com/backend-api`。你也可以填写 `api_key` 作为兜底。
 
 如果你更喜欢手工配置，也可以直接写 `microclaw.config.yaml`：
 
@@ -372,7 +375,7 @@ microclaw gateway uninstall
 | 配置键 | 必需 | 默认值 | 描述 |
 |------|------|--------|------|
 | `telegram_bot_token` | 是 | -- | BotFather 的 Telegram bot token |
-| `api_key` | 是* | -- | LLM API key（`ollama` 可留空） |
+| `api_key` | 是* | -- | LLM API key（`ollama` 和 `openai-codex` 可留空） |
 | `bot_username` | 是 | -- | Bot 用户名（不带 @） |
 | `llm_provider` | 否 | `anthropic` | 提供方预设 ID（或自定义 ID）。`anthropic` 走原生 Anthropic API，其他走 OpenAI 兼容 API |
 | `model` | 否 | 随 provider 默认 | 模型名 |
@@ -390,7 +393,7 @@ microclaw gateway uninstall
 
 ### 支持的 `llm_provider` 值
 
-`openai`、`openrouter`、`anthropic`、`ollama`、`google`、`alibaba`、`deepseek`、`moonshot`、`mistral`、`azure`、`bedrock`、`zhipu`、`minimax`、`cohere`、`tencent`、`xai`、`huggingface`、`together`、`custom`。
+`openai`、`openai-codex`、`openrouter`、`anthropic`、`ollama`、`google`、`alibaba`、`deepseek`、`moonshot`、`mistral`、`azure`、`bedrock`、`zhipu`、`minimax`、`cohere`、`tencent`、`xai`、`huggingface`、`together`、`custom`。
 
 ## 群聊
 

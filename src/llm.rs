@@ -11,6 +11,9 @@ use crate::claude::{
     ContentBlock, ImageSource, Message, MessageContent, MessagesRequest, MessagesResponse,
     ResponseContentBlock, ToolDefinition, Usage,
 };
+use crate::codex_auth::{
+    is_openai_codex_provider, refresh_openai_codex_auth_if_needed, resolve_openai_codex_auth,
+};
 use crate::config::Config;
 #[cfg(test)]
 use crate::config::WorkingDirIsolation;
@@ -668,25 +671,61 @@ impl LlmProvider for AnthropicProvider {
 pub struct OpenAiProvider {
     http: reqwest::Client,
     api_key: String,
+    codex_account_id: Option<String>,
     model: String,
     max_tokens: u32,
+    is_openai_codex: bool,
     chat_url: String,
+    responses_url: String,
+}
+
+fn resolve_openai_compat_base(provider: &str, configured_base: &str) -> String {
+    let trimmed = configured_base.trim().trim_end_matches('/').to_string();
+    if is_openai_codex_provider(provider) {
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("https://api.openai.com/v1") {
+            return "https://chatgpt.com/backend-api/codex".to_string();
+        }
+        if trimmed.eq_ignore_ascii_case("https://chatgpt.com/backend-api") {
+            return "https://chatgpt.com/backend-api/codex".to_string();
+        }
+        return trimmed;
+    }
+
+    if trimmed.is_empty() {
+        "https://api.openai.com/v1".to_string()
+    } else {
+        trimmed
+    }
 }
 
 impl OpenAiProvider {
     pub fn new(config: &Config) -> Self {
-        let base = config
-            .llm_base_url
-            .as_deref()
-            .unwrap_or("https://api.openai.com/v1");
-        let chat_url = format!("{}/chat/completions", base.trim_end_matches('/'));
+        let is_openai_codex = is_openai_codex_provider(&config.llm_provider);
+        let configured_base = config.llm_base_url.as_deref().unwrap_or("");
+        let base = resolve_openai_compat_base(&config.llm_provider, configured_base);
+
+        let (api_key, codex_account_id) = if is_openai_codex {
+            let _ = refresh_openai_codex_auth_if_needed();
+            match resolve_openai_codex_auth(&config.api_key) {
+                Ok(auth) => (auth.bearer_token, auth.account_id),
+                Err(e) => {
+                    warn!("{}", e);
+                    (String::new(), None)
+                }
+            }
+        } else {
+            (config.api_key.clone(), None)
+        };
 
         OpenAiProvider {
             http: reqwest::Client::new(),
-            api_key: config.api_key.clone(),
+            api_key,
+            codex_account_id,
             model: config.model.clone(),
             max_tokens: config.max_tokens,
-            chat_url,
+            is_openai_codex,
+            chat_url: format!("{}/chat/completions", base.trim_end_matches('/')),
+            responses_url: format!("{}/responses", base.trim_end_matches('/')),
         }
     }
 }
@@ -739,6 +778,45 @@ struct OaiErrorDetail {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct OaiResponsesResponse {
+    output: Vec<OaiResponsesOutputItem>,
+    usage: Option<OaiResponsesUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OaiResponsesUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum OaiResponsesOutputItem {
+    #[serde(rename = "message")]
+    Message {
+        content: Vec<OaiResponsesOutputContentPart>,
+    },
+    #[serde(rename = "function_call")]
+    FunctionCall {
+        id: Option<String>,
+        call_id: Option<String>,
+        name: String,
+        arguments: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum OaiResponsesOutputContentPart {
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
+    #[serde(other)]
+    Other,
+}
+
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
     async fn send_message(
@@ -747,6 +825,10 @@ impl LlmProvider for OpenAiProvider {
         messages: Vec<Message>,
         tools: Option<Vec<ToolDefinition>>,
     ) -> Result<MessagesResponse, MicroClawError> {
+        if self.is_openai_codex {
+            return self.send_codex_message(system, messages, tools).await;
+        }
+
         let oai_messages = translate_messages_to_oai(system, &messages);
 
         let mut body = json!({
@@ -912,6 +994,126 @@ impl LlmProvider for OpenAiProvider {
     }
 }
 
+impl OpenAiProvider {
+    async fn send_codex_message(
+        &self,
+        system: &str,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+    ) -> Result<MessagesResponse, MicroClawError> {
+        let instructions = if system.trim().is_empty() {
+            "You are a helpful assistant."
+        } else {
+            system
+        };
+        let mut input = translate_messages_to_oai_responses_input(&messages);
+        if input.is_empty() {
+            input.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": "",
+            }));
+        }
+        let mut body = json!({
+            "model": self.model,
+            "input": input,
+            "instructions": instructions,
+            "store": false,
+            "stream": true,
+        });
+        if let Some(ref tool_defs) = tools {
+            if !tool_defs.is_empty() {
+                body["tools"] = json!(translate_tools_to_oai_responses(tool_defs));
+                body["tool_choice"] = json!("auto");
+            }
+        }
+
+        let mut retries = 0u32;
+        let max_retries = 3;
+
+        loop {
+            let mut req = self
+                .http
+                .post(&self.responses_url)
+                .header("Content-Type", "application/json")
+                .json(&body);
+            if !self.api_key.trim().is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", self.api_key));
+            }
+            if let Some(account_id) = self.codex_account_id.as_deref() {
+                if !account_id.trim().is_empty() {
+                    req = req.header("ChatGPT-Account-ID", account_id);
+                }
+            }
+            let response = req.send().await?;
+            let status = response.status();
+
+            if status.is_success() {
+                let text = response.text().await?;
+                let parsed = parse_openai_codex_response_payload(&text)?;
+                return Ok(translate_oai_responses_response(parsed));
+            }
+
+            if status.as_u16() == 429 && retries < max_retries {
+                retries += 1;
+                let delay = std::time::Duration::from_secs(2u64.pow(retries));
+                warn!(
+                    "Rate limited, retrying in {:?} (attempt {retries}/{max_retries})",
+                    delay
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+
+            let text = response.text().await.unwrap_or_default();
+            if let Ok(err) = serde_json::from_str::<OaiErrorResponse>(&text) {
+                return Err(MicroClawError::LlmApi(err.error.message));
+            }
+            return Err(MicroClawError::LlmApi(format!("HTTP {status}: {text}")));
+        }
+    }
+}
+
+fn parse_openai_codex_response_payload(text: &str) -> Result<OaiResponsesResponse, MicroClawError> {
+    if let Ok(parsed) = serde_json::from_str::<OaiResponsesResponse>(text) {
+        return Ok(parsed);
+    }
+
+    let mut from_done_event: Option<OaiResponsesResponse> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with("data:") {
+            continue;
+        }
+        let payload = line.trim_start_matches("data:").trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+
+        if let Some(response_value) = value.get("response") {
+            if let Ok(parsed) =
+                serde_json::from_value::<OaiResponsesResponse>(response_value.clone())
+            {
+                from_done_event = Some(parsed);
+                if value.get("type").and_then(|v| v.as_str()) == Some("response.done") {
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(parsed) = from_done_event {
+        return Ok(parsed);
+    }
+
+    Err(MicroClawError::LlmApi(format!(
+        "Failed to parse OpenAI Codex response payload. Body: {text}"
+    )))
+}
+
 // ---------------------------------------------------------------------------
 // Format translation helpers  (internal Anthropic-style ↔ OpenAI)
 // ---------------------------------------------------------------------------
@@ -1074,6 +1276,216 @@ fn translate_tools_to_oai(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+fn translate_tools_to_oai_responses(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
+    tools
+        .iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.input_schema,
+            })
+        })
+        .collect()
+}
+
+fn translate_messages_to_oai_responses_input(messages: &[Message]) -> Vec<serde_json::Value> {
+    let known_tool_ids: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .flat_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => vec![],
+        })
+        .collect();
+
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for msg in messages {
+        match &msg.content {
+            MessageContent::Text(text) => {
+                out.push(json!({
+                    "type": "message",
+                    "role": msg.role,
+                    "content": text,
+                }));
+            }
+            MessageContent::Blocks(blocks) => {
+                if msg.role == "assistant" {
+                    let text: String = blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if !text.is_empty() {
+                        out.push(json!({
+                            "type": "message",
+                            "role": "assistant",
+                            "content": text,
+                        }));
+                    }
+
+                    for block in blocks {
+                        if let ContentBlock::ToolUse { id, name, input } = block {
+                            out.push(json!({
+                                "type": "function_call",
+                                "call_id": id,
+                                "name": name,
+                                "arguments": serde_json::to_string(input).unwrap_or_default(),
+                            }));
+                        }
+                    }
+                } else {
+                    let has_tool_results = blocks
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+                    if has_tool_results {
+                        for block in blocks {
+                            if let ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } = block
+                            {
+                                if !known_tool_ids.contains(tool_use_id.as_str()) {
+                                    continue;
+                                }
+                                let c = if is_error == &Some(true) {
+                                    format!("[Error] {content}")
+                                } else {
+                                    content.clone()
+                                };
+                                out.push(json!({
+                                    "type": "function_call_output",
+                                    "call_id": tool_use_id,
+                                    "output": c,
+                                }));
+                            }
+                        }
+                    } else {
+                        let has_images = blocks
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::Image { .. }));
+                        if has_images {
+                            let parts: Vec<serde_json::Value> = blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    ContentBlock::Text { text } => {
+                                        Some(json!({"type": "input_text", "text": text}))
+                                    }
+                                    ContentBlock::Image {
+                                        source:
+                                            ImageSource {
+                                                media_type, data, ..
+                                            },
+                                    } => Some(json!({
+                                        "type": "input_image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": data,
+                                        }
+                                    })),
+                                    _ => None,
+                                })
+                                .collect();
+                            out.push(json!({
+                                "type": "message",
+                                "role": "user",
+                                "content": parts,
+                            }));
+                        } else {
+                            let text: String = blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    ContentBlock::Text { text } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            out.push(json!({
+                                "type": "message",
+                                "role": "user",
+                                "content": text,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn translate_oai_responses_response(resp: OaiResponsesResponse) -> MessagesResponse {
+    let mut content: Vec<ResponseContentBlock> = Vec::new();
+    let mut saw_tool_use = false;
+    let mut call_idx = 0usize;
+
+    for item in resp.output {
+        match item {
+            OaiResponsesOutputItem::Message { content: parts } => {
+                for part in parts {
+                    if let OaiResponsesOutputContentPart::OutputText { text } = part {
+                        if !text.is_empty() {
+                            content.push(ResponseContentBlock::Text { text });
+                        }
+                    }
+                }
+            }
+            OaiResponsesOutputItem::FunctionCall {
+                id,
+                call_id,
+                name,
+                arguments,
+            } => {
+                let parsed_args: serde_json::Value =
+                    serde_json::from_str(&arguments).unwrap_or_default();
+                let call_id = call_id.or(id).unwrap_or_else(|| {
+                    call_idx += 1;
+                    format!("call_{call_idx}")
+                });
+                content.push(ResponseContentBlock::ToolUse {
+                    id: call_id,
+                    name,
+                    input: parsed_args,
+                });
+                saw_tool_use = true;
+            }
+            OaiResponsesOutputItem::Other => {}
+        }
+    }
+
+    if content.is_empty() {
+        content.push(ResponseContentBlock::Text {
+            text: String::new(),
+        });
+    }
+
+    MessagesResponse {
+        content,
+        stop_reason: Some(if saw_tool_use {
+            "tool_use".into()
+        } else {
+            "end_turn".into()
+        }),
+        usage: resp.usage.map(|usage| Usage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+        }),
+    }
 }
 
 fn translate_oai_response(oai: OaiResponse) -> MessagesResponse {
@@ -1318,6 +1730,21 @@ mod tests {
         assert_eq!(out[0]["type"], "function");
         assert_eq!(out[0]["function"]["name"], "bash");
         assert_eq!(out[0]["function"]["description"], "Run bash");
+    }
+
+    #[test]
+    fn test_translate_tools_to_oai_responses() {
+        let tools = vec![ToolDefinition {
+            name: "bash".into(),
+            description: "Run bash".into(),
+            input_schema: json!({"type": "object", "properties": {"cmd": {"type": "string"}}}),
+        }];
+        let out = translate_tools_to_oai_responses(&tools);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["type"], "function");
+        assert_eq!(out[0]["name"], "bash");
+        assert_eq!(out[0]["description"], "Run bash");
+        assert_eq!(out[0]["parameters"]["type"], "object");
     }
 
     // -----------------------------------------------------------------------
@@ -1689,5 +2116,64 @@ mod tests {
         assert!(events.is_empty());
         let tail = parser.finish();
         assert_eq!(tail, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_openai_compat_base_defaults_openai() {
+        let base = resolve_openai_compat_base("openai", "");
+        assert_eq!(base, "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn test_resolve_openai_compat_base_defaults_openai_codex() {
+        let base = resolve_openai_compat_base("openai-codex", "");
+        assert_eq!(base, "https://chatgpt.com/backend-api/codex");
+    }
+
+    #[test]
+    fn test_resolve_openai_compat_base_upgrades_legacy_codex_base() {
+        let base = resolve_openai_compat_base("openai-codex", "https://chatgpt.com/backend-api");
+        assert_eq!(base, "https://chatgpt.com/backend-api/codex");
+    }
+
+    #[test]
+    fn test_resolve_openai_compat_base_keeps_codex_specific_base() {
+        let base =
+            resolve_openai_compat_base("openai-codex", "https://chatgpt.com/backend-api/codex");
+        assert_eq!(base, "https://chatgpt.com/backend-api/codex");
+    }
+
+    #[test]
+    fn test_parse_openai_codex_response_payload_json() {
+        let body = r#"{
+          "output":[{"type":"message","content":[{"type":"output_text","text":"Hello"}]}],
+          "usage":{"input_tokens":12,"output_tokens":34}
+        }"#;
+        let parsed = parse_openai_codex_response_payload(body).unwrap();
+        let translated = translate_oai_responses_response(parsed);
+        assert_eq!(translated.stop_reason.as_deref(), Some("end_turn"));
+        match &translated.content[0] {
+            ResponseContentBlock::Text { text } => assert_eq!(text, "Hello"),
+            _ => panic!("Expected text block"),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_codex_response_payload_sse_response_done() {
+        let body = r#"event: response.created
+data: {"type":"response.created","response":{"output":[]}}
+
+event: response.done
+data: {"type":"response.done","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"From SSE"}]}],"usage":{"input_tokens":1,"output_tokens":2}}}
+
+data: [DONE]
+"#;
+        let parsed = parse_openai_codex_response_payload(body).unwrap();
+        let translated = translate_oai_responses_response(parsed);
+        assert_eq!(translated.stop_reason.as_deref(), Some("end_turn"));
+        match &translated.content[0] {
+            ResponseContentBlock::Text { text } => assert_eq!(text, "From SSE"),
+            _ => panic!("Expected text block"),
+        }
     }
 }
