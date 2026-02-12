@@ -1,4 +1,4 @@
-name: Build for Ubuntu 20.04
+name: Build in Docker (Ubuntu 20.04)
 
 on:
   push:
@@ -7,22 +7,28 @@ on:
 
 jobs:
   build:
-    # 关键点：直接使用和你的服务器一样的系统版本
-    runs-on: ubuntu-20.04
+    # 1. 使用最新的主机，秒级启动，不用排队
+    runs-on: ubuntu-latest
+    # 2. 关键点：在 Ubuntu 20.04 容器内执行所有步骤
+    container: ubuntu:20.04
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
-    - name: Install Dependencies
+    - name: Install System Deps
+      # 容器是空的，需要先安装基础工具
       run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential libssl-dev pkg-config
+        apt-get update
+        apt-get install -y build-essential libssl-dev pkg-config curl git
 
-    - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
+    - name: Install Rust
+      # 在容器内安装 Rust
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        # 将 cargo 加入环境变量
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-    - name: Build Binary
-      # 这里不需要 --target，直接编译就是原生的 Linux 程序
+    - name: Build Release
       run: cargo build --release
 
     - name: Upload Artifact
