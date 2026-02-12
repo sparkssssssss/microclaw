@@ -7,25 +7,21 @@ on:
 
 jobs:
   build:
-    # 1. 使用最新的主机，秒级启动，不用排队
     runs-on: ubuntu-latest
-    # 2. 关键点：在 Ubuntu 20.04 容器内执行所有步骤
     container: ubuntu:20.04
 
     steps:
     - uses: actions/checkout@v4
 
     - name: Install System Deps
-      # 容器是空的，需要先安装基础工具
       run: |
         apt-get update
-        apt-get install -y build-essential libssl-dev pkg-config curl git
+        # 关键修复：加入 DEBIAN_FRONTEND=noninteractive 防止卡在选时区
+        DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libssl-dev pkg-config curl git
 
     - name: Install Rust
-      # 在容器内安装 Rust
       run: |
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        # 将 cargo 加入环境变量
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
     - name: Build Release
