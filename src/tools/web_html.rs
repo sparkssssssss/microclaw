@@ -7,10 +7,14 @@ pub struct SearchItem {
     pub snippet: String,
 }
 
-/// 安全切片辅助函数：如果索引不在字符边界，自动向前寻找最近的合法边界
-/// 防止 "byte index is not a char boundary" Panic
+// ==========================================
+// 安全切片辅助函数 (防止 Panic 核心逻辑)
+// ==========================================
+
+/// 安全切片：如果索引不在字符边界，自动向前调整；如果越界，返回空字符串
 fn safe_slice(s: &str, start: usize, end: usize) -> &str {
     let len = s.len();
+    // floor_char_boundary 确保索引落在字符开始位置
     let start = s.floor_char_boundary(start.min(len));
     let end = s.floor_char_boundary(end.min(len));
     
@@ -18,76 +22,94 @@ fn safe_slice(s: &str, start: usize, end: usize) -> &str {
         return "";
     }
     
-    // 双重保险，使用 get 避免任何可能的越界
+    // 使用 get 避免 panic
     s.get(start..end).unwrap_or("")
 }
 
-/// 安全切片（RangeFrom）：对应 s[start..]
+/// 安全切片（从 start 到末尾）
 fn safe_slice_from(s: &str, start: usize) -> &str {
     let len = s.len();
     let start = s.floor_char_boundary(start.min(len));
     s.get(start..).unwrap_or("")
 }
 
+// ==========================================
+// 核心逻辑函数
+// ==========================================
+
 fn strip_block(mut html: String, tag: &str) -> String {
     let open = format!("<{}", tag);
     let close = format!("</{}>", tag);
     
-    // 限制循环次数防止死循环，并在每次修改后重置搜索位置
-    // 因为 replace_range 会改变字符串长度，索引会失效
-    // 但简单的做法是每次从头找，或者仔细维护 offset。
-    // 原逻辑维护了 offset 是高效的，但需要确保边界安全。
+    // 循环清理所有匹配的块
     let mut search_start = 0;
     
     loop {
-        // 使用 safe_slice_from 确保搜索子串是安全的，虽然 find_case_insensitive 内部处理了 from
         let Some(start) = find_case_insensitive(&html, &open, search_start) else {
             break;
         };
         
         let Some(end) = find_case_insensitive(&html, &close, start) else {
-            // 没有闭合标签，直接截断到开始处
-            html.truncate(start);
+            // 只有开始没有结束，为了安全，截断后续所有内容
+            if html.is_char_boundary(start) {
+                html.truncate(start);
+            }
             break;
         };
         
         let remove_to = end + close.len();
         
-        // 关键：确保 remove_to 是合法的字符边界
-        if !html.is_char_boundary(remove_to) {
-            // 如果计算出的结束位置非法，尝试向后找最近的边界
-            // 这里通常是因为 close.len() 是 ASCII 没问题，但防御性处理
-            search_start = start + 1; 
-            continue; 
+        // 再次检查边界合法性
+        if !html.is_char_boundary(start) || !html.is_char_boundary(remove_to) {
+            // 如果计算出的位置非法，为了防止死循环，强制跳过当前位置
+            search_start = start + 1;
+            continue;
         }
 
-        // replace_range 要求 range 的 start 和 end 必须是 char boundary
-        // start 来自 find (safe), remove_to 检查过
+        // 替换为一个空格
         html.replace_range(start..remove_to, " ");
         
-        // 下次搜索从替换位置开始（现在是一个空格）
+        // 下次搜索从替换位置开始
         search_start = start;
     }
     html
 }
 
+/// 查找子串（不区分大小写），带死循环保护
 fn find_case_insensitive(haystack: &str, needle: &str, from: usize) -> Option<usize> {
     if from >= haystack.len() {
         return None;
     }
 
-    // 确保起始搜索位置是合法的字符边界
-    let from = haystack.floor_char_boundary(from);
+    // 1. 安全起点（可能会因为 UTF-8 边界回退）
+    let safe_start = haystack.floor_char_boundary(from);
     
-    // 安全获取子串
-    let h_slice = haystack.get(from..)?; 
-    let h = h_slice.to_ascii_lowercase();
-    let n = needle.to_ascii_lowercase();
+    let slice = haystack.get(safe_start..)?;
+    // 注意：to_ascii_lowercase 会分配新内存
+    let lower_slice = slice.to_ascii_lowercase();
+    let lower_needle = needle.to_ascii_lowercase();
+
+    let mut search_offset = 0;
     
-    // 注意：这里假设 to_ascii_lowercase 不会改变字符串的字节长度
-    // 对于绝大多数 UTF-8 场景这是成立的，但如果索引对不齐，下面的 idx 可能会有问题
-    // 所以调用方拿到结果后，再次切片前一定要检查
-    h.find(&n).map(|idx| from + idx)
+    loop {
+        // 在子串中查找
+        let match_idx = lower_slice[search_offset..].find(&lower_needle)?;
+        
+        // 计算绝对索引
+        let absolute_idx = safe_start + search_offset + match_idx;
+        
+        // 2. 关键判定：如果因为 floor 回退导致找到了之前的标签，必须跳过
+        if absolute_idx >= from {
+            return Some(absolute_idx);
+        }
+
+        // 找到了旧数据，跳过它继续找
+        search_offset += match_idx + 1;
+        
+        if search_offset >= lower_slice.len() {
+            return None;
+        }
+    }
 }
 
 pub fn decode_html_entities(input: &str) -> Cow<'_, str> {
@@ -96,7 +118,6 @@ pub fn decode_html_entities(input: &str) -> Cow<'_, str> {
     }
 
     let mut out = input.to_string();
-    // 扩展常见实体
     let replacements = [
         ("&nbsp;", " "),
         ("&amp;", "&"),
@@ -169,8 +190,7 @@ fn extract_attr(tag: &str, attr: &str) -> Option<String> {
     let needle = format!("{}=", attr.to_ascii_lowercase());
     let idx = lower_tag.find(&needle)?;
     
-    // 危险点 1：基于 lower_tag 的索引切片 tag
-    // 修复：使用 safe_slice_from
+    // 安全切片
     let raw_start = idx + needle.len();
     let raw = safe_slice_from(tag, raw_start);
     let raw = raw.trim_start();
@@ -182,11 +202,8 @@ fn extract_attr(tag: &str, attr: &str) -> Option<String> {
     let first = raw.chars().next()?;
     if first == '"' || first == '\'' {
         let quote = first;
-        // 危险点 2：&raw[1..]
-        // 修复：1 是 quote 的长度（ASCII），通常安全，但用 get 更稳妥
-        let rest = raw.get(1..)?;
+        let rest = raw.get(1..)?; // 跳过引号
         let end = rest.find(quote)?;
-        // 危险点 3：切片到 end
         return Some(safe_slice(rest, 0, end).to_string());
     }
 
@@ -194,12 +211,10 @@ fn extract_attr(tag: &str, attr: &str) -> Option<String> {
         .find(|c: char| c.is_whitespace() || c == '>')
         .unwrap_or(raw.len());
     
-    // 危险点 4
     Some(safe_slice(raw, 0, end).to_string())
 }
 
 fn extract_snippet_near(html: &str, from: usize) -> String {
-    // 原始代码这里已经做了 floor_char_boundary，很好
     let from = html.floor_char_boundary(from.min(html.len()));
     let window_end = html.floor_char_boundary(from.saturating_add(4000).min(html.len()));
     
@@ -210,11 +225,9 @@ fn extract_snippet_near(html: &str, from: usize) -> String {
         return String::new();
     };
 
-    // safe_slice 替代 segment[..class_idx]
     let pre_segment = safe_slice(segment, 0, class_idx);
     let tag_start = pre_segment.rfind('<').unwrap_or(0);
     
-    // safe_slice_from 替代 segment[tag_start..]
     let search_segment = safe_slice_from(segment, tag_start);
     let Some(tag_end_rel) = search_segment.find('>') else {
         return String::new();
@@ -231,8 +244,6 @@ fn extract_snippet_near(html: &str, from: usize) -> String {
         return String::new();
     };
 
-    // 危险点：tag_end + 1 可能是乱码位置（虽然 > 是 1 字节）
-    // 修复：使用 safe_slice
     let inner = safe_slice(segment, tag_end + 1, close_rel);
     html_to_text(inner)
 }
@@ -240,25 +251,42 @@ fn extract_snippet_near(html: &str, from: usize) -> String {
 pub fn extract_ddg_results(html: &str, max_results: usize) -> Vec<SearchItem> {
     let mut results = Vec::new();
     let mut pos = 0usize;
+    
+    // 循环安全计数器
+    let mut loop_count = 0;
+    const MAX_LOOP_LIMIT: usize = 100; 
 
     while results.len() < max_results {
+        loop_count += 1;
+        if loop_count > MAX_LOOP_LIMIT {
+            // 超过100次循环还没找完，强制退出防止卡死
+            break;
+        }
+        
+        // 记录循环开始时的位置，用于检测是否原地踏步
+        let start_pos = pos;
+
         let Some(a_start) = find_case_insensitive(html, "<a", pos) else {
             break;
         };
         
-        // 安全切片查找 >
         let search_area = safe_slice_from(html, a_start);
         let Some(a_tag_end_rel) = search_area.find('>') else {
             break;
         };
         let a_tag_end = a_start + a_tag_end_rel;
         
-        // 获取完整的 a 标签字符串用于提取属性
         let a_tag = safe_slice(html, a_start, a_tag_end + 1);
 
         let class = extract_attr(a_tag, "class").unwrap_or_default();
         if !class.split_whitespace().any(|c| c == "result__a") {
+            // 跳过非结果链接
             pos = a_tag_end + 1;
+            
+            // 确保 pos 前进
+            if pos <= start_pos {
+                pos = start_pos + 1;
+            }
             continue;
         }
 
@@ -270,11 +298,8 @@ pub fn extract_ddg_results(html: &str, max_results: usize) -> Vec<SearchItem> {
             .map(|h| decode_html_entities(&h).into_owned())
             .unwrap_or_default();
             
-        // 危险点：切片 title_html
         let title_html = safe_slice(html, a_tag_end + 1, close_rel);
         let title = html_to_text(title_html);
-        
-        // 提取摘要
         let snippet = extract_snippet_near(html, close_rel + 4);
 
         if !href.is_empty() && !title.is_empty() {
@@ -286,6 +311,19 @@ pub fn extract_ddg_results(html: &str, max_results: usize) -> Vec<SearchItem> {
         }
 
         pos = close_rel + 4;
+        
+        // 最终防御：如果 pos 没有增加，强制增加
+        if pos <= start_pos {
+            pos = start_pos + 1; 
+        }
+    }
+
+    // 只有在结果为空时才打印日志，帮助排查问题
+    if results.is_empty() {
+        println!("[Warn] extract_ddg_results found 0 items. HTML len: {}. Preview: {:?}", 
+            html.len(), 
+            safe_slice(html, 0, 300) // 打印前300字符
+        );
     }
 
     results
@@ -297,15 +335,11 @@ pub fn extract_primary_html(html: &str) -> &str {
         let open = format!("<{tag}");
         let close = format!("</{tag}>");
         if let Some(start) = find_case_insensitive(html, &open, 0) {
-            // 安全切片查找 >
             let search_area = safe_slice_from(html, start);
             if let Some(open_end_rel) = search_area.find('>') {
                 let content_start = start + open_end_rel + 1;
                 
-                // 这里 content_start 依赖于 +1，虽然 > 是 ASCII，但最好防御一下
-                // find_case_insensitive 内部会处理 content_start 的边界
                 if let Some(end) = find_case_insensitive(html, &close, content_start) {
-                    // 最终切片返回
                     return safe_slice(html, content_start, end);
                 }
             }
@@ -346,24 +380,22 @@ mod tests {
     }
 
     #[test]
-    fn test_find_case_insensitive_non_char_boundary_input() {
+    fn test_find_case_insensitive_loop_fix() {
+        // 测试死循环修复逻辑
         let s = "abc只def";
-        // byte 4 is inside the multi-byte '只'
-        // find_case_insensitive 现在会内部 floor 到 index 3
-        // 然后 slice "只def" 找 "def" -> index 3 + 3 = 6
+        // '只'在索引3,4,5
+        // 从索引4开始查找 'def' (索引6)
+        // 原始逻辑 floor(4)->3, find('只')->3, 3 < 4, 死循环
+        // 新逻辑应该跳过3，找到6
         assert_eq!(find_case_insensitive(s, "def", 4), Some(6));
     }
     
     #[test]
-    fn test_safe_slice_panic_prevention() {
-        let s = "abc只def"; // '只' 占用 3 bytes (indices 3,4,5)
-        // 尝试切片 s[3..5] (非法)
-        // safe_slice 应该把它变成 s[3..3] 或者 s[3..6] 取决于逻辑，这里逻辑是 floor
-        // start=3(OK), end=5(Inside->Floor to 3). Result: ""
-        assert_eq!(safe_slice(s, 3, 5), "");
-        
-        // 尝试切片 s[4..]
-        // floor(4) -> 3. "只def"
+    fn test_safe_slice() {
+        let s = "abc只def";
+        // 切片 s[3..5] 是非法的 (只占3,4,5)
+        // safe_slice 应该 floor 调整
+        assert_eq!(safe_slice(s, 3, 5), ""); 
         assert_eq!(safe_slice_from(s, 4), "只def");
     }
 }
