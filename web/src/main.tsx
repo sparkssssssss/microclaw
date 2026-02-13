@@ -39,6 +39,7 @@ import '@radix-ui/themes/styles.css'
 import '@assistant-ui/react-ui/styles/index.css'
 import './styles.css'
 import { SessionSidebar } from './components/session-sidebar'
+import { UsagePanel, type InjectionLogPoint, type MemoryObservability, type ReflectorRunPoint } from './components/usage-panel'
 import type { SessionItem } from './types'
 
 type ConfigPayload = Record<string, unknown>
@@ -613,6 +614,9 @@ function App() {
   const [usageOpen, setUsageOpen] = useState<boolean>(false)
   const [usageLoading, setUsageLoading] = useState<boolean>(false)
   const [usageReport, setUsageReport] = useState<string>('')
+  const [usageMemory, setUsageMemory] = useState<MemoryObservability | null>(null)
+  const [usageReflectorRuns, setUsageReflectorRuns] = useState<ReflectorRunPoint[]>([])
+  const [usageInjectionLogs, setUsageInjectionLogs] = useState<InjectionLogPoint[]>([])
   const [usageError, setUsageError] = useState<string>('')
   const [usageSession, setUsageSession] = useState<string>('')
 
@@ -969,11 +973,28 @@ function App() {
     setUsageLoading(true)
     setUsageError('')
     setUsageReport('')
+    setUsageMemory(null)
+    setUsageReflectorRuns([])
+    setUsageInjectionLogs([])
     setUsageSession(targetSession)
     try {
       const query = new URLSearchParams({ session_key: targetSession })
-      const data = await api<{ report?: string }>(`/api/usage?${query.toString()}`)
+      const data = await api<{ report?: string; memory_observability?: MemoryObservability }>(`/api/usage?${query.toString()}`)
       setUsageReport(String(data.report || '').trim())
+      setUsageMemory(data.memory_observability ?? null)
+      const moQuery = new URLSearchParams({
+        session_key: targetSession,
+        scope: 'chat',
+        hours: '168',
+        limit: '1000',
+        offset: '0',
+      })
+      const series = await api<{
+        reflector_runs?: ReflectorRunPoint[]
+        injection_logs?: InjectionLogPoint[]
+      }>(`/api/memory_observability?${moQuery.toString()}`)
+      setUsageReflectorRuns(Array.isArray(series.reflector_runs) ? series.reflector_runs : [])
+      setUsageInjectionLogs(Array.isArray(series.injection_logs) ? series.injection_logs : [])
       setUsageOpen(true)
     } catch (e) {
       setUsageError(e instanceof Error ? e.message : String(e))
@@ -1633,35 +1654,20 @@ function App() {
             </div>
           </Dialog.Content>
         </Dialog.Root>
-        <Dialog.Root open={usageOpen} onOpenChange={setUsageOpen}>
-          <Dialog.Content maxWidth="980px" className="overflow-hidden flex flex-col" style={{ width: '980px', height: '720px', maxWidth: '980px', maxHeight: '720px' }}>
-            <Dialog.Title>Usage Panel</Dialog.Title>
-            <Dialog.Description size="2" mb="3">
-              Token and cost summary for session <code>{usageSession || sessionKey}</code>
-            </Dialog.Description>
-            <div className="mb-3">
-              <Flex gap="2">
-                <Button size="2" variant="soft" onClick={() => void openUsage(sessionKey)} disabled={usageLoading}>
-                  Refresh Current Session
-                </Button>
-                <Button size="2" variant="soft" onClick={() => void openUsage(usageSession || sessionKey)} disabled={usageLoading}>
-                  Refresh This Panel
-                </Button>
-              </Flex>
-            </div>
-            <Card className="min-h-0 flex-1 overflow-auto p-3">
-              {usageLoading ? (
-                <Text size="2">Loading usage report...</Text>
-              ) : usageError ? (
-                <Callout.Root color="red" size="1" variant="soft">
-                  <Callout.Text>{usageError}</Callout.Text>
-                </Callout.Root>
-              ) : (
-                <pre className="whitespace-pre-wrap break-words text-[13px] leading-6">{usageReport || '(no usage data)'}</pre>
-              )}
-            </Card>
-          </Dialog.Content>
-        </Dialog.Root>
+        <UsagePanel
+          open={usageOpen}
+          onOpenChange={setUsageOpen}
+          usageSession={usageSession}
+          sessionKey={sessionKey}
+          usageLoading={usageLoading}
+          usageError={usageError}
+          usageReport={usageReport}
+          usageMemory={usageMemory}
+          reflectorRuns={usageReflectorRuns}
+          injectionLogs={usageInjectionLogs}
+          onRefreshCurrent={() => void openUsage(sessionKey)}
+          onRefreshThis={() => void openUsage(usageSession || sessionKey)}
+        />
       </div>
     </Theme>
   )

@@ -90,7 +90,57 @@ pub struct Memory {
     pub created_at: String,
     pub updated_at: String,
     pub embedding_model: Option<String>,
+    pub confidence: f64,
+    pub source: String,
+    pub last_seen_at: String,
+    pub is_archived: bool,
+    pub archived_at: Option<String>,
 }
+
+#[derive(Debug, Clone)]
+pub struct MemoryObservabilitySummary {
+    pub total: i64,
+    pub active: i64,
+    pub archived: i64,
+    pub low_confidence: i64,
+    pub avg_confidence: f64,
+    pub reflector_runs_24h: i64,
+    pub reflector_inserted_24h: i64,
+    pub reflector_updated_24h: i64,
+    pub reflector_skipped_24h: i64,
+    pub injection_events_24h: i64,
+    pub injection_selected_24h: i64,
+    pub injection_candidates_24h: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryReflectorRun {
+    pub id: i64,
+    pub chat_id: i64,
+    pub started_at: String,
+    pub finished_at: String,
+    pub extracted_count: i64,
+    pub inserted_count: i64,
+    pub updated_count: i64,
+    pub skipped_count: i64,
+    pub dedup_method: String,
+    pub parse_ok: bool,
+    pub error_text: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryInjectionLog {
+    pub id: i64,
+    pub chat_id: i64,
+    pub created_at: String,
+    pub retrieval_method: String,
+    pub candidate_count: i64,
+    pub selected_count: i64,
+    pub omitted_count: i64,
+    pub tokens_est: i64,
+}
+
+const SCHEMA_VERSION_CURRENT: i64 = 4;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -127,6 +177,33 @@ fn ensure_memory_schema(conn: &Connection) -> Result<(), MicroClawError> {
     if !table_has_column(conn, "memories", "external_chat_id")? {
         conn.execute("ALTER TABLE memories ADD COLUMN external_chat_id TEXT", [])?;
     }
+    if !table_has_column(conn, "memories", "confidence")? {
+        conn.execute("ALTER TABLE memories ADD COLUMN confidence REAL", [])?;
+    }
+    if !table_has_column(conn, "memories", "source")? {
+        conn.execute("ALTER TABLE memories ADD COLUMN source TEXT", [])?;
+    }
+    if !table_has_column(conn, "memories", "last_seen_at")? {
+        conn.execute("ALTER TABLE memories ADD COLUMN last_seen_at TEXT", [])?;
+    }
+    if !table_has_column(conn, "memories", "is_archived")? {
+        conn.execute("ALTER TABLE memories ADD COLUMN is_archived INTEGER", [])?;
+    }
+    if !table_has_column(conn, "memories", "archived_at")? {
+        conn.execute("ALTER TABLE memories ADD COLUMN archived_at TEXT", [])?;
+    }
+    conn.execute(
+        "UPDATE memories
+         SET confidence = COALESCE(confidence, 0.70),
+             source = COALESCE(NULLIF(source, ''), 'legacy'),
+             last_seen_at = COALESCE(last_seen_at, updated_at, created_at),
+             is_archived = COALESCE(is_archived, 0)
+         WHERE confidence IS NULL
+            OR source IS NULL OR trim(source) = ''
+            OR last_seen_at IS NULL
+            OR is_archived IS NULL",
+        [],
+    )?;
     let chats_has_channel = table_has_column(conn, "chats", "channel")?;
     let chats_has_external = table_has_column(conn, "chats", "external_chat_id")?;
     if chats_has_channel && chats_has_external {
@@ -196,6 +273,119 @@ fn ensure_chat_identity_schema(conn: &Connection) -> Result<(), MicroClawError> 
          ON chats(channel, external_chat_id)",
         [],
     )?;
+    Ok(())
+}
+
+fn get_schema_version(conn: &Connection) -> Result<i64, MicroClawError> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS db_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )?;
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM db_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(raw.and_then(|s| s.parse::<i64>().ok()).unwrap_or(0))
+}
+
+fn set_schema_version(conn: &Connection, version: i64) -> Result<(), MicroClawError> {
+    conn.execute(
+        "INSERT INTO db_meta(key, value) VALUES('schema_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![version.to_string()],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL,
+            note TEXT
+        )",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_migrations(version, applied_at, note)
+         VALUES(?1, ?2, ?3)",
+        params![version, chrono::Utc::now().to_rfc3339(), "applied"],
+    )?;
+    Ok(())
+}
+
+fn apply_schema_migrations(conn: &Connection) -> Result<(), MicroClawError> {
+    let mut version = get_schema_version(conn)?;
+    if version < 1 {
+        set_schema_version(conn, 1)?;
+        version = 1;
+    }
+    if version < 2 {
+        ensure_chat_identity_schema(conn)?;
+        ensure_memory_schema(conn)?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_active_updated ON memories(is_archived, updated_at)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_confidence ON memories(confidence)",
+            [],
+        )?;
+        set_schema_version(conn, 2)?;
+        version = 2;
+    }
+    if version < 3 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memory_reflector_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL,
+                extracted_count INTEGER NOT NULL DEFAULT 0,
+                inserted_count INTEGER NOT NULL DEFAULT 0,
+                updated_count INTEGER NOT NULL DEFAULT 0,
+                skipped_count INTEGER NOT NULL DEFAULT 0,
+                dedup_method TEXT NOT NULL,
+                parse_ok INTEGER NOT NULL DEFAULT 1,
+                error_text TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_reflector_runs_chat_started
+                ON memory_reflector_runs(chat_id, started_at);
+            CREATE TABLE IF NOT EXISTS memory_injection_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                retrieval_method TEXT NOT NULL,
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                selected_count INTEGER NOT NULL DEFAULT 0,
+                omitted_count INTEGER NOT NULL DEFAULT 0,
+                tokens_est INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_injection_logs_chat_created
+                ON memory_injection_logs(chat_id, created_at);",
+        )?;
+        set_schema_version(conn, 3)?;
+        version = 3;
+    }
+    if version < 4 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memory_supersede_edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_memory_id INTEGER NOT NULL,
+                to_memory_id INTEGER NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_supersede_from
+                ON memory_supersede_edges(from_memory_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_memory_supersede_to
+                ON memory_supersede_edges(to_memory_id, created_at);",
+        )?;
+        set_schema_version(conn, 4)?;
+        version = 4;
+    }
+    if version != SCHEMA_VERSION_CURRENT {
+        set_schema_version(conn, SCHEMA_VERSION_CURRENT)?;
+    }
     Ok(())
 }
 
@@ -306,6 +496,11 @@ impl Database {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 embedding_model TEXT,
+                confidence REAL NOT NULL DEFAULT 0.70,
+                source TEXT NOT NULL DEFAULT 'legacy',
+                last_seen_at TEXT NOT NULL,
+                is_archived INTEGER NOT NULL DEFAULT 0,
+                archived_at TEXT,
                 chat_channel TEXT,
                 external_chat_id TEXT
             );
@@ -316,15 +511,53 @@ impl Database {
                 last_reflected_ts TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS memory_reflector_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL,
+                extracted_count INTEGER NOT NULL DEFAULT 0,
+                inserted_count INTEGER NOT NULL DEFAULT 0,
+                updated_count INTEGER NOT NULL DEFAULT 0,
+                skipped_count INTEGER NOT NULL DEFAULT 0,
+                dedup_method TEXT NOT NULL,
+                parse_ok INTEGER NOT NULL DEFAULT 1,
+                error_text TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_reflector_runs_chat_started
+                ON memory_reflector_runs(chat_id, started_at);
+
+            CREATE TABLE IF NOT EXISTS memory_injection_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                retrieval_method TEXT NOT NULL,
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                selected_count INTEGER NOT NULL DEFAULT 0,
+                omitted_count INTEGER NOT NULL DEFAULT 0,
+                tokens_est INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_injection_logs_chat_created
+                ON memory_injection_logs(chat_id, created_at);
             ",
         )?;
 
         ensure_chat_identity_schema(&conn)?;
         ensure_memory_schema(&conn)?;
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_active_updated ON memories(is_archived, updated_at)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_confidence ON memories(confidence)",
+            [],
+        )?;
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS db_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
             [],
         )?;
+        apply_schema_migrations(&conn)?;
 
         Ok(Database {
             conn: Mutex::new(conn),
@@ -916,6 +1149,21 @@ impl Database {
             "DELETE FROM memory_reflector_state WHERE chat_id = ?1",
             params![chat_id],
         )?;
+        affected += tx.execute(
+            "DELETE FROM memory_reflector_runs WHERE chat_id = ?1",
+            params![chat_id],
+        )?;
+        affected += tx.execute(
+            "DELETE FROM memory_injection_logs WHERE chat_id = ?1",
+            params![chat_id],
+        )?;
+        affected += tx.execute(
+            "DELETE FROM memory_supersede_edges
+             WHERE from_memory_id IN (SELECT id FROM memories WHERE chat_id = ?1)
+                OR to_memory_id IN (SELECT id FROM memories WHERE chat_id = ?1)",
+            params![chat_id],
+        )?;
+        affected += tx.execute("DELETE FROM memories WHERE chat_id = ?1", params![chat_id])?;
         affected += tx.execute("DELETE FROM chats WHERE chat_id = ?1", params![chat_id])?;
 
         tx.commit()?;
@@ -1228,6 +1476,17 @@ impl Database {
         content: &str,
         category: &str,
     ) -> Result<i64, MicroClawError> {
+        self.insert_memory_with_metadata(chat_id, content, category, "tool", 0.80)
+    }
+
+    pub fn insert_memory_with_metadata(
+        &self,
+        chat_id: Option<i64>,
+        content: &str,
+        category: &str,
+        source: &str,
+        confidence: f64,
+    ) -> Result<i64, MicroClawError> {
         let conn = self.lock_conn();
         let now = chrono::Utc::now().to_rfc3339();
         let (chat_channel, external_chat_id) = if let Some(cid) = chat_id {
@@ -1248,13 +1507,17 @@ impl Database {
         };
         conn.execute(
             "INSERT INTO memories (
-                chat_id, content, category, created_at, updated_at, embedding_model, chat_channel, external_chat_id
-            ) VALUES (?1, ?2, ?3, ?4, ?4, NULL, ?5, ?6)",
+                chat_id, content, category, created_at, updated_at, embedding_model,
+                confidence, source, last_seen_at, is_archived, archived_at,
+                chat_channel, external_chat_id
+            ) VALUES (?1, ?2, ?3, ?4, ?4, NULL, ?5, ?6, ?4, 0, NULL, ?7, ?8)",
             params![
                 chat_id,
                 content,
                 category,
                 now,
+                confidence.clamp(0.0, 1.0),
+                source,
                 chat_channel,
                 external_chat_id
             ],
@@ -1269,9 +1532,12 @@ impl Database {
     ) -> Result<Vec<Memory>, MicroClawError> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model
+            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model,
+                    confidence, source, last_seen_at, is_archived, archived_at
              FROM memories
              WHERE (chat_id = ?1 OR chat_id IS NULL)
+               AND is_archived = 0
+               AND confidence >= 0.45
              ORDER BY updated_at DESC
              LIMIT ?2",
         )?;
@@ -1285,6 +1551,11 @@ impl Database {
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
                     embedding_model: row.get(6)?,
+                    confidence: row.get(7)?,
+                    source: row.get(8)?,
+                    last_seen_at: row.get(9)?,
+                    is_archived: row.get::<_, i64>(10)? != 0,
+                    archived_at: row.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1297,7 +1568,8 @@ impl Database {
     ) -> Result<Vec<Memory>, MicroClawError> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model
+            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model,
+                    confidence, source, last_seen_at, is_archived, archived_at
              FROM memories
              WHERE (chat_id = ?1 OR (?1 IS NULL AND chat_id IS NULL))",
         )?;
@@ -1311,6 +1583,11 @@ impl Database {
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
                     embedding_model: row.get(6)?,
+                    confidence: row.get(7)?,
+                    source: row.get(8)?,
+                    last_seen_at: row.get(9)?,
+                    is_archived: row.get::<_, i64>(10)? != 0,
+                    archived_at: row.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1335,16 +1612,34 @@ impl Database {
         query: &str,
         limit: usize,
     ) -> Result<Vec<Memory>, MicroClawError> {
+        self.search_memories_with_options(chat_id, query, limit, false, true)
+    }
+
+    pub fn search_memories_with_options(
+        &self,
+        chat_id: i64,
+        query: &str,
+        limit: usize,
+        include_archived: bool,
+        broad_recall: bool,
+    ) -> Result<Vec<Memory>, MicroClawError> {
         let conn = self.lock_conn();
         let pattern = format!("%{}%", query.to_lowercase());
-        let mut stmt = conn.prepare(
-            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model
+        let mut sql = String::from(
+            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model,
+                    confidence, source, last_seen_at, is_archived, archived_at
              FROM memories
              WHERE (chat_id = ?1 OR chat_id IS NULL)
-               AND LOWER(content) LIKE ?2
-             ORDER BY updated_at DESC
-             LIMIT ?3",
-        )?;
+               AND LOWER(content) LIKE ?2",
+        );
+        if !include_archived {
+            sql.push_str(" AND is_archived = 0");
+        }
+        if !broad_recall {
+            sql.push_str(" AND confidence >= 0.45");
+        }
+        sql.push_str(" ORDER BY confidence DESC, updated_at DESC LIMIT ?3");
+        let mut stmt = conn.prepare(&sql)?;
         let memories = stmt
             .query_map(params![chat_id, pattern, limit as i64], |row| {
                 Ok(Memory {
@@ -1355,6 +1650,11 @@ impl Database {
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
                     embedding_model: row.get(6)?,
+                    confidence: row.get(7)?,
+                    source: row.get(8)?,
+                    last_seen_at: row.get(9)?,
+                    is_archived: row.get::<_, i64>(10)? != 0,
+                    archived_at: row.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1379,9 +1679,50 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
         let rows = conn.execute(
             "UPDATE memories
-             SET content = ?1, category = ?2, updated_at = ?3, embedding_model = NULL
+             SET content = ?1,
+                 category = ?2,
+                 updated_at = ?3,
+                 embedding_model = NULL,
+                 last_seen_at = ?3,
+                 is_archived = 0,
+                 archived_at = NULL
              WHERE id = ?4",
             params![content, category, now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_memory_with_metadata(
+        &self,
+        id: i64,
+        content: &str,
+        category: &str,
+        confidence: f64,
+        source: &str,
+    ) -> Result<bool, MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE memories
+             SET content = ?1,
+                 category = ?2,
+                 updated_at = ?3,
+                 embedding_model = NULL,
+                 confidence = ?4,
+                 source = ?5,
+                 last_seen_at = ?3,
+                 is_archived = 0,
+                 archived_at = NULL
+             WHERE id = ?6",
+            params![
+                content,
+                category,
+                now,
+                confidence.clamp(0.0, 1.0),
+                source,
+                id
+            ],
         )?;
         Ok(rows > 0)
     }
@@ -1407,8 +1748,10 @@ impl Database {
         let conn = self.lock_conn();
         let mut query = String::from(
             "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model
+             , confidence, source, last_seen_at, is_archived, archived_at
              FROM memories
-             WHERE embedding_model IS NULL",
+             WHERE embedding_model IS NULL
+               AND is_archived = 0",
         );
         if chat_id.is_some() {
             query.push_str(" AND chat_id = ?1");
@@ -1426,6 +1769,11 @@ impl Database {
                 created_at: row.get(4)?,
                 updated_at: row.get(5)?,
                 embedding_model: row.get(6)?,
+                confidence: row.get(7)?,
+                source: row.get(8)?,
+                last_seen_at: row.get(9)?,
+                is_archived: row.get::<_, i64>(10)? != 0,
+                archived_at: row.get(11)?,
             })
         };
 
@@ -1521,7 +1869,8 @@ impl Database {
     pub fn get_memory_by_id(&self, id: i64) -> Result<Option<Memory>, MicroClawError> {
         let conn = self.lock_conn();
         let result = conn.query_row(
-            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model
+            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model,
+                    confidence, source, last_seen_at, is_archived, archived_at
              FROM memories WHERE id = ?1",
             params![id],
             |row| {
@@ -1533,6 +1882,11 @@ impl Database {
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
                     embedding_model: row.get(6)?,
+                    confidence: row.get(7)?,
+                    source: row.get(8)?,
+                    last_seen_at: row.get(9)?,
+                    is_archived: row.get::<_, i64>(10)? != 0,
+                    archived_at: row.get(11)?,
                 })
             },
         );
@@ -1541,6 +1895,434 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    pub fn touch_memory_last_seen(
+        &self,
+        id: i64,
+        confidence_floor: Option<f64>,
+    ) -> Result<bool, MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = if let Some(floor) = confidence_floor {
+            conn.execute(
+                "UPDATE memories
+                 SET last_seen_at = ?1,
+                     confidence = MAX(confidence, ?2)
+                 WHERE id = ?3",
+                params![now, floor.clamp(0.0, 1.0), id],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE memories SET last_seen_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?
+        };
+        Ok(rows > 0)
+    }
+
+    pub fn archive_memory(&self, id: i64) -> Result<bool, MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE memories
+             SET is_archived = 1, archived_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn archive_stale_memories(&self, stale_days: i64) -> Result<usize, MicroClawError> {
+        let conn = self.lock_conn();
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(stale_days.max(1))).to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE memories
+             SET is_archived = 1, archived_at = ?1, updated_at = ?1
+             WHERE is_archived = 0
+               AND confidence < 0.35
+               AND COALESCE(last_seen_at, updated_at, created_at) < ?2",
+            params![now, cutoff],
+        )?;
+        Ok(rows)
+    }
+
+    pub fn supersede_memory(
+        &self,
+        from_memory_id: i64,
+        new_content: &str,
+        category: &str,
+        source: &str,
+        confidence: f64,
+        reason: Option<&str>,
+    ) -> Result<i64, MicroClawError> {
+        let conn = self.lock_conn();
+        let tx = conn.unchecked_transaction()?;
+        let (chat_id, chat_channel, external_chat_id): (
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT chat_id, chat_channel, external_chat_id FROM memories WHERE id = ?1",
+            params![from_memory_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO memories (
+                chat_id, content, category, created_at, updated_at, embedding_model,
+                confidence, source, last_seen_at, is_archived, archived_at, chat_channel, external_chat_id
+            ) VALUES (?1, ?2, ?3, ?4, ?4, NULL, ?5, ?6, ?4, 0, NULL, ?7, ?8)",
+            params![
+                chat_id,
+                new_content,
+                category,
+                now,
+                confidence.clamp(0.0, 1.0),
+                source,
+                chat_channel,
+                external_chat_id
+            ],
+        )?;
+        let to_memory_id = tx.last_insert_rowid();
+
+        tx.execute(
+            "UPDATE memories
+             SET is_archived = 1, archived_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![now, from_memory_id],
+        )?;
+        tx.execute(
+            "INSERT INTO memory_supersede_edges(from_memory_id, to_memory_id, reason, created_at)
+             VALUES(?1, ?2, ?3, ?4)",
+            params![from_memory_id, to_memory_id, reason, now],
+        )?;
+        tx.commit()?;
+        Ok(to_memory_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_reflector_run(
+        &self,
+        chat_id: i64,
+        started_at: &str,
+        finished_at: &str,
+        extracted_count: usize,
+        inserted_count: usize,
+        updated_count: usize,
+        skipped_count: usize,
+        dedup_method: &str,
+        parse_ok: bool,
+        error_text: Option<&str>,
+    ) -> Result<i64, MicroClawError> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "INSERT INTO memory_reflector_runs (
+                chat_id, started_at, finished_at, extracted_count, inserted_count, updated_count, skipped_count, dedup_method, parse_ok, error_text
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                chat_id,
+                started_at,
+                finished_at,
+                extracted_count as i64,
+                inserted_count as i64,
+                updated_count as i64,
+                skipped_count as i64,
+                dedup_method,
+                if parse_ok { 1 } else { 0 },
+                error_text
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn log_memory_injection(
+        &self,
+        chat_id: i64,
+        retrieval_method: &str,
+        candidate_count: usize,
+        selected_count: usize,
+        omitted_count: usize,
+        tokens_est: usize,
+    ) -> Result<i64, MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO memory_injection_logs (
+                chat_id, created_at, retrieval_method, candidate_count, selected_count, omitted_count, tokens_est
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                chat_id,
+                now,
+                retrieval_method,
+                candidate_count as i64,
+                selected_count as i64,
+                omitted_count as i64,
+                tokens_est as i64
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_memory_observability_summary(
+        &self,
+        chat_id: Option<i64>,
+    ) -> Result<MemoryObservabilitySummary, MicroClawError> {
+        let conn = self.lock_conn();
+        let since_24h = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+
+        let (total, active, archived, low_confidence, avg_confidence) = if let Some(cid) = chat_id {
+            conn.query_row(
+                "SELECT
+                    COUNT(*),
+                    COALESCE(SUM(CASE WHEN is_archived = 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN is_archived != 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN confidence < 0.45 THEN 1 ELSE 0 END), 0),
+                    COALESCE(AVG(confidence), 0.0)
+                 FROM memories
+                 WHERE chat_id = ?1 OR chat_id IS NULL",
+                params![cid],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, f64>(4)?,
+                    ))
+                },
+            )?
+        } else {
+            conn.query_row(
+                "SELECT
+                    COUNT(*),
+                    COALESCE(SUM(CASE WHEN is_archived = 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN is_archived != 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN confidence < 0.45 THEN 1 ELSE 0 END), 0),
+                    COALESCE(AVG(confidence), 0.0)
+                 FROM memories",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, f64>(4)?,
+                    ))
+                },
+            )?
+        };
+
+        let (
+            reflector_runs_24h,
+            reflector_inserted_24h,
+            reflector_updated_24h,
+            reflector_skipped_24h,
+        ) = if let Some(cid) = chat_id {
+            conn.query_row(
+                "SELECT
+                        COUNT(*),
+                        COALESCE(SUM(inserted_count), 0),
+                        COALESCE(SUM(updated_count), 0),
+                        COALESCE(SUM(skipped_count), 0)
+                     FROM memory_reflector_runs
+                     WHERE chat_id = ?1 AND started_at >= ?2",
+                params![cid, &since_24h],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )?
+        } else {
+            conn.query_row(
+                "SELECT
+                        COUNT(*),
+                        COALESCE(SUM(inserted_count), 0),
+                        COALESCE(SUM(updated_count), 0),
+                        COALESCE(SUM(skipped_count), 0)
+                     FROM memory_reflector_runs
+                     WHERE started_at >= ?1",
+                params![&since_24h],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )?
+        };
+
+        let (injection_events_24h, injection_selected_24h, injection_candidates_24h) =
+            if let Some(cid) = chat_id {
+                conn.query_row(
+                    "SELECT
+                        COUNT(*),
+                        COALESCE(SUM(selected_count), 0),
+                        COALESCE(SUM(candidate_count), 0)
+                     FROM memory_injection_logs
+                     WHERE chat_id = ?1 AND created_at >= ?2",
+                    params![cid, &since_24h],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )?
+            } else {
+                conn.query_row(
+                    "SELECT
+                        COUNT(*),
+                        COALESCE(SUM(selected_count), 0),
+                        COALESCE(SUM(candidate_count), 0)
+                     FROM memory_injection_logs
+                     WHERE created_at >= ?1",
+                    params![&since_24h],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )?
+            };
+
+        Ok(MemoryObservabilitySummary {
+            total,
+            active,
+            archived,
+            low_confidence,
+            avg_confidence,
+            reflector_runs_24h,
+            reflector_inserted_24h,
+            reflector_updated_24h,
+            reflector_skipped_24h,
+            injection_events_24h,
+            injection_selected_24h,
+            injection_candidates_24h,
+        })
+    }
+
+    pub fn get_memory_reflector_runs(
+        &self,
+        chat_id: Option<i64>,
+        since: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryReflectorRun>, MicroClawError> {
+        let conn = self.lock_conn();
+        let mut query = String::from(
+            "SELECT id, chat_id, started_at, finished_at, extracted_count, inserted_count, updated_count, skipped_count, dedup_method, parse_ok, error_text
+             FROM memory_reflector_runs",
+        );
+        let mut where_parts: Vec<&str> = Vec::new();
+        if chat_id.is_some() {
+            where_parts.push("chat_id = ?1");
+        }
+        if since.is_some() {
+            where_parts.push(if chat_id.is_some() {
+                "started_at >= ?2"
+            } else {
+                "started_at >= ?1"
+            });
+        }
+        if !where_parts.is_empty() {
+            query.push_str(" WHERE ");
+            query.push_str(&where_parts.join(" AND "));
+        }
+        query.push_str(" ORDER BY started_at ASC LIMIT ");
+        query.push_str(&limit.max(1).to_string());
+        query.push_str(" OFFSET ");
+        query.push_str(&offset.to_string());
+
+        let mut stmt = conn.prepare(&query)?;
+        let mapper = |row: &rusqlite::Row<'_>| {
+            Ok(MemoryReflectorRun {
+                id: row.get(0)?,
+                chat_id: row.get(1)?,
+                started_at: row.get(2)?,
+                finished_at: row.get(3)?,
+                extracted_count: row.get(4)?,
+                inserted_count: row.get(5)?,
+                updated_count: row.get(6)?,
+                skipped_count: row.get(7)?,
+                dedup_method: row.get(8)?,
+                parse_ok: row.get::<_, i64>(9)? != 0,
+                error_text: row.get(10)?,
+            })
+        };
+        let rows = match (chat_id, since) {
+            (Some(cid), Some(ts)) => stmt.query_map(params![cid, ts], mapper)?,
+            (Some(cid), None) => stmt.query_map(params![cid], mapper)?,
+            (None, Some(ts)) => stmt.query_map(params![ts], mapper)?,
+            (None, None) => stmt.query_map([], mapper)?,
+        };
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_memory_injection_logs(
+        &self,
+        chat_id: Option<i64>,
+        since: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryInjectionLog>, MicroClawError> {
+        let conn = self.lock_conn();
+        let mut query = String::from(
+            "SELECT id, chat_id, created_at, retrieval_method, candidate_count, selected_count, omitted_count, tokens_est
+             FROM memory_injection_logs",
+        );
+        let mut where_parts: Vec<&str> = Vec::new();
+        if chat_id.is_some() {
+            where_parts.push("chat_id = ?1");
+        }
+        if since.is_some() {
+            where_parts.push(if chat_id.is_some() {
+                "created_at >= ?2"
+            } else {
+                "created_at >= ?1"
+            });
+        }
+        if !where_parts.is_empty() {
+            query.push_str(" WHERE ");
+            query.push_str(&where_parts.join(" AND "));
+        }
+        query.push_str(" ORDER BY created_at ASC LIMIT ");
+        query.push_str(&limit.max(1).to_string());
+        query.push_str(" OFFSET ");
+        query.push_str(&offset.to_string());
+
+        let mut stmt = conn.prepare(&query)?;
+        let mapper = |row: &rusqlite::Row<'_>| {
+            Ok(MemoryInjectionLog {
+                id: row.get(0)?,
+                chat_id: row.get(1)?,
+                created_at: row.get(2)?,
+                retrieval_method: row.get(3)?,
+                candidate_count: row.get(4)?,
+                selected_count: row.get(5)?,
+                omitted_count: row.get(6)?,
+                tokens_est: row.get(7)?,
+            })
+        };
+        let rows = match (chat_id, since) {
+            (Some(cid), Some(ts)) => stmt.query_map(params![cid, ts], mapper)?,
+            (Some(cid), None) => stmt.query_map(params![cid], mapper)?,
+            (None, Some(ts)) => stmt.query_map(params![ts], mapper)?,
+            (None, None) => stmt.query_map([], mapper)?,
+        };
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
 
@@ -1566,6 +2348,103 @@ mod tests {
         assert!(msgs.is_empty());
         let tasks = db.get_due_tasks("2099-01-01T00:00:00Z").unwrap();
         assert!(tasks.is_empty());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_schema_version_is_tracked() {
+        let (db, dir) = test_db();
+        let conn = db.lock_conn();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM db_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION_CURRENT.to_string());
+        drop(conn);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_legacy_schema_is_upgraded_to_current_version() {
+        let dir =
+            std::env::temp_dir().join(format!("microclaw_legacy_upgrade_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("microclaw.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE chats (
+                chat_id INTEGER PRIMARY KEY,
+                chat_title TEXT,
+                chat_type TEXT NOT NULL DEFAULT 'private',
+                last_message_time TEXT NOT NULL
+             );
+             CREATE TABLE messages (
+                id TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                sender_name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                is_from_bot INTEGER NOT NULL DEFAULT 0,
+                timestamp TEXT NOT NULL,
+                PRIMARY KEY (id, chat_id)
+             );
+             CREATE TABLE scheduled_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                prompt TEXT NOT NULL,
+                schedule_type TEXT NOT NULL DEFAULT 'cron',
+                schedule_value TEXT NOT NULL,
+                next_run TEXT NOT NULL,
+                last_run TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL
+             );
+             CREATE TABLE sessions (
+                chat_id INTEGER PRIMARY KEY,
+                messages_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                content TEXT NOT NULL,
+                category TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Database::new(dir.to_str().unwrap()).unwrap();
+        let conn = db.lock_conn();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM db_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION_CURRENT.to_string());
+
+        let has_confidence = table_has_column(&conn, "memories", "confidence").unwrap();
+        let has_source = table_has_column(&conn, "memories", "source").unwrap();
+        let has_last_seen = table_has_column(&conn, "memories", "last_seen_at").unwrap();
+        let has_archived = table_has_column(&conn, "memories", "is_archived").unwrap();
+        assert!(has_confidence && has_source && has_last_seen && has_archived);
+
+        let supersede_table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_supersede_edges'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(supersede_table_exists, 1);
+        drop(conn);
         cleanup(&dir);
     }
 
@@ -2525,6 +3404,103 @@ mod tests {
         let results = db.search_memories(100, "nonexistent_xyz", 10).unwrap();
         assert!(results.is_empty());
 
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_archive_memory_hides_from_search_and_context() {
+        let (db, dir) = test_db();
+        let id = db
+            .insert_memory(Some(100), "User prefers concise summaries", "PROFILE")
+            .unwrap();
+        assert!(db.archive_memory(id).unwrap());
+
+        let mem = db.get_memory_by_id(id).unwrap().unwrap();
+        assert!(mem.is_archived);
+        assert!(mem.archived_at.is_some());
+
+        let search = db.search_memories(100, "concise", 10).unwrap();
+        assert!(search.is_empty());
+        let context = db.get_memories_for_context(100, 10).unwrap();
+        assert!(context.is_empty());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_memory_observability_summary_rollup() {
+        let (db, dir) = test_db();
+        db.insert_memory_with_metadata(Some(100), "prod db on 5433", "KNOWLEDGE", "explicit", 0.95)
+            .unwrap();
+        let stale_id = db
+            .insert_memory_with_metadata(Some(100), "temporary thought", "EVENT", "reflector", 0.20)
+            .unwrap();
+        db.archive_memory(stale_id).unwrap();
+        db.log_reflector_run(
+            100,
+            "2026-02-13T00:00:00Z",
+            "2026-02-13T00:00:01Z",
+            3,
+            1,
+            1,
+            1,
+            "jaccard",
+            true,
+            None,
+        )
+        .unwrap();
+        db.log_memory_injection(100, "keyword", 5, 2, 3, 80)
+            .unwrap();
+
+        let summary = db.get_memory_observability_summary(Some(100)).unwrap();
+        assert!(summary.total >= 2);
+        assert!(summary.active >= 1);
+        assert!(summary.archived >= 1);
+        assert!(summary.reflector_runs_24h >= 1);
+        assert!(summary.injection_events_24h >= 1);
+        assert!(summary.injection_candidates_24h >= summary.injection_selected_24h);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_supersede_memory_creates_edge_and_archives_old() {
+        let (db, dir) = test_db();
+        let old_id = db
+            .insert_memory_with_metadata(
+                Some(100),
+                "prod db port is 5433",
+                "KNOWLEDGE",
+                "explicit",
+                0.95,
+            )
+            .unwrap();
+        let new_id = db
+            .supersede_memory(
+                old_id,
+                "prod db port is 6432",
+                "KNOWLEDGE",
+                "explicit_conflict",
+                0.96,
+                Some("port_update"),
+            )
+            .unwrap();
+        assert!(new_id > old_id);
+        let old = db.get_memory_by_id(old_id).unwrap().unwrap();
+        let newm = db.get_memory_by_id(new_id).unwrap().unwrap();
+        assert!(old.is_archived);
+        assert_eq!(newm.content, "prod db port is 6432");
+
+        let conn = db.lock_conn();
+        let edge_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_supersede_edges WHERE from_memory_id = ?1 AND to_memory_id = ?2",
+                params![old_id, new_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_count, 1);
+        drop(conn);
         cleanup(&dir);
     }
 

@@ -381,6 +381,15 @@ struct UsageQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct MemoryObservabilityQuery {
+    session_key: Option<String>,
+    scope: Option<String>, // chat | global
+    hours: Option<u64>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct UpdateConfigRequest {
     llm_provider: Option<String>,
     api_key: Option<String>,
@@ -739,12 +748,126 @@ async fn api_usage(
     let report = build_usage_report(state.app_state.db.clone(), &state.app_state.config, chat_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let memory_observability = call_blocking(state.app_state.db.clone(), move |db| {
+        db.get_memory_observability_summary(Some(chat_id))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({
         "ok": true,
         "session_key": session_key,
         "chat_id": chat_id,
         "report": report,
+        "memory_observability": {
+            "total": memory_observability.total,
+            "active": memory_observability.active,
+            "archived": memory_observability.archived,
+            "low_confidence": memory_observability.low_confidence,
+            "avg_confidence": memory_observability.avg_confidence,
+            "reflector_runs_24h": memory_observability.reflector_runs_24h,
+            "reflector_inserted_24h": memory_observability.reflector_inserted_24h,
+            "reflector_updated_24h": memory_observability.reflector_updated_24h,
+            "reflector_skipped_24h": memory_observability.reflector_skipped_24h,
+            "injection_events_24h": memory_observability.injection_events_24h,
+            "injection_selected_24h": memory_observability.injection_selected_24h,
+            "injection_candidates_24h": memory_observability.injection_candidates_24h,
+        },
+    })))
+}
+
+async fn api_memory_observability(
+    headers: HeaderMap,
+    State(state): State<WebState>,
+    Query(query): Query<MemoryObservabilityQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_auth(&headers, state.auth_token.as_deref())?;
+
+    let scope = query
+        .scope
+        .as_deref()
+        .unwrap_or("chat")
+        .trim()
+        .to_ascii_lowercase();
+    let hours = query.hours.unwrap_or(24).clamp(1, 24 * 30);
+    let limit = query.limit.unwrap_or(200).clamp(1, 2000);
+    let offset = query.offset.unwrap_or(0);
+    let since = (chrono::Utc::now() - chrono::Duration::hours(hours as i64)).to_rfc3339();
+
+    let chat_id_filter = if scope == "global" {
+        None
+    } else {
+        let session_key = normalize_session_key(query.session_key.as_deref());
+        Some(resolve_chat_id_for_session_key(&state, &session_key).await?)
+    };
+
+    let summary = call_blocking(state.app_state.db.clone(), move |db| {
+        db.get_memory_observability_summary(chat_id_filter)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let since_for_reflector = since.clone();
+    let reflector_runs = call_blocking(state.app_state.db.clone(), {
+        move |db| {
+            db.get_memory_reflector_runs(chat_id_filter, Some(&since_for_reflector), limit, offset)
+        }
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let since_for_injection = since.clone();
+    let injection_logs = call_blocking(state.app_state.db.clone(), move |db| {
+        db.get_memory_injection_logs(chat_id_filter, Some(&since_for_injection), limit, offset)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "scope": if scope == "global" { "global" } else { "chat" },
+        "window_hours": hours,
+        "pagination": {
+            "limit": limit,
+            "offset": offset
+        },
+        "summary": {
+            "total": summary.total,
+            "active": summary.active,
+            "archived": summary.archived,
+            "low_confidence": summary.low_confidence,
+            "avg_confidence": summary.avg_confidence,
+            "reflector_runs_24h": summary.reflector_runs_24h,
+            "reflector_inserted_24h": summary.reflector_inserted_24h,
+            "reflector_updated_24h": summary.reflector_updated_24h,
+            "reflector_skipped_24h": summary.reflector_skipped_24h,
+            "injection_events_24h": summary.injection_events_24h,
+            "injection_selected_24h": summary.injection_selected_24h,
+            "injection_candidates_24h": summary.injection_candidates_24h
+        },
+        "reflector_runs": reflector_runs.iter().map(|r| json!({
+            "id": r.id,
+            "chat_id": r.chat_id,
+            "started_at": r.started_at,
+            "finished_at": r.finished_at,
+            "extracted_count": r.extracted_count,
+            "inserted_count": r.inserted_count,
+            "updated_count": r.updated_count,
+            "skipped_count": r.skipped_count,
+            "dedup_method": r.dedup_method,
+            "parse_ok": r.parse_ok,
+            "error_text": r.error_text,
+        })).collect::<Vec<_>>(),
+        "injection_logs": injection_logs.iter().map(|r| json!({
+            "id": r.id,
+            "chat_id": r.chat_id,
+            "created_at": r.created_at,
+            "retrieval_method": r.retrieval_method,
+            "candidate_count": r.candidate_count,
+            "selected_count": r.selected_count,
+            "omitted_count": r.omitted_count,
+            "tokens_est": r.tokens_est
+        })).collect::<Vec<_>>(),
     })))
 }
 
@@ -1331,6 +1454,7 @@ fn build_router(web_state: WebState) -> Router {
         .route("/api/sessions", get(api_sessions))
         .route("/api/history", get(api_history))
         .route("/api/usage", get(api_usage))
+        .route("/api/memory_observability", get(api_memory_observability))
         .route("/api/send", post(api_send))
         .route("/api/send_stream", post(api_send_stream))
         .route("/api/stream", get(api_stream))
@@ -1846,9 +1970,70 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v.get("ok").and_then(|x| x.as_bool()), Some(true));
         let report = v.get("report").and_then(|x| x.as_str()).unwrap_or_default();
         assert!(report.contains("Token Usage"));
         assert!(report.contains("This chat"));
+        let mem = v.get("memory_observability").and_then(|x| x.as_object());
+        assert!(mem.is_some());
+        assert!(mem.unwrap().contains_key("total"));
+    }
+
+    #[tokio::test]
+    async fn test_api_memory_observability_returns_series() {
+        let web_state = test_web_state(Box::new(DummyLlm), None, WebLimits::default());
+        let db = web_state.app_state.db.clone();
+        call_blocking(db, |d| {
+            d.upsert_chat(123, Some("main"), "web")?;
+            d.insert_memory_with_metadata(
+                Some(123),
+                "prod db on 5433",
+                "KNOWLEDGE",
+                "explicit",
+                0.95,
+            )?;
+            d.log_reflector_run(
+                123,
+                "2026-02-13T00:00:00Z",
+                "2026-02-13T00:00:01Z",
+                2,
+                1,
+                0,
+                1,
+                "jaccard",
+                true,
+                None,
+            )?;
+            d.log_memory_injection(123, "keyword", 5, 2, 3, 80)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let app = build_router(web_state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/memory_observability?session_key=main&scope=chat&hours=24&limit=50")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v.get("ok").and_then(|x| x.as_bool()), Some(true));
+        assert_eq!(v.get("scope").and_then(|x| x.as_str()), Some("chat"));
+        assert!(v
+            .get("reflector_runs")
+            .and_then(|x| x.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false));
+        assert!(v
+            .get("injection_logs")
+            .and_then(|x| x.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false));
     }
 
     #[tokio::test]

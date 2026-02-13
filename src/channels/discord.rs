@@ -12,7 +12,7 @@ use crate::agent_engine::process_with_agent;
 use crate::agent_engine::AgentRequestContext;
 use crate::db::call_blocking;
 use crate::db::StoredMessage;
-use crate::llm_types::Message as ClaudeMessage;
+use crate::llm_types::Message as LlmMessage;
 use crate::runtime::AppState;
 use crate::text::floor_char_boundary;
 use crate::usage::build_usage_report;
@@ -78,7 +78,7 @@ impl EventHandler for Handler {
             })
             .await
             {
-                let messages: Vec<ClaudeMessage> = serde_json::from_str(&json).unwrap_or_default();
+                let messages: Vec<LlmMessage> = serde_json::from_str(&json).unwrap_or_default();
                 if messages.is_empty() {
                     let _ = msg
                         .channel_id
@@ -182,7 +182,7 @@ impl EventHandler for Handler {
         // Start typing indicator
         let typing = msg.channel_id.start_typing(&ctx.http);
 
-        // Process with Claude (reuses the same agentic loop as Telegram)
+        // Process with shared agent engine (reuses the same loop as Telegram)
         match process_with_agent(
             &self.app_state,
             AgentRequestContext {

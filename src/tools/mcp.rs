@@ -17,7 +17,7 @@ impl McpTool {
     pub fn new(server: Arc<McpServer>, tool_info: McpToolInfo) -> Self {
         // Namespaced name: mcp_{server}_{tool} to avoid conflicts with built-in tools
         let qualified_name = format!("mcp_{}_{}", tool_info.server_name, tool_info.name);
-        // Sanitize: Claude API tool names must match [a-zA-Z0-9_-]{1,64}
+        // Sanitize: tool names must match [a-zA-Z0-9_-]{1,64}
         let qualified_name: String = qualified_name
             .chars()
             .map(|c| {

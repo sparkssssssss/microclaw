@@ -797,7 +797,7 @@ mod tests {
             make_msg("2", "bot", "response", true, "2024-01-01T00:00:02Z"),
         ];
         let messages = history_to_claude_messages(&history, "bot");
-        // Trailing assistant message should be removed (Claude API requires last msg to be user)
+        // Trailing assistant message should be removed (messages API expects last msg from user)
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
     }
