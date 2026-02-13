@@ -121,8 +121,15 @@ pub struct Config {
     pub openai_api_key: Option<String>,
     #[serde(default = "default_timezone")]
     pub timezone: String,
+    
+    // Groups allowlist (Chat IDs are i64)
     #[serde(default)]
     pub allowed_groups: Vec<i64>,
+
+    // [新增] Users allowlist (User IDs are u64)
+    #[serde(default)]
+    pub allowed_users: Vec<u64>,
+
     #[serde(default = "default_control_chat_ids")]
     pub control_chat_ids: Vec<i64>,
     #[serde(default = "default_max_session_messages")]
@@ -351,6 +358,7 @@ mod tests {
             openai_api_key: None,
             timezone: "UTC".into(),
             allowed_groups: vec![],
+            allowed_users: vec![], // Update test struct
             control_chat_ids: vec![],
             max_session_messages: 40,
             compact_keep_recent: 20,
@@ -385,6 +393,7 @@ mod tests {
         assert!(cloned.openai_api_key.is_none());
         assert_eq!(cloned.timezone, "UTC");
         assert!(cloned.allowed_groups.is_empty());
+        assert!(cloned.allowed_users.is_empty()); // Verify new field
         assert!(cloned.control_chat_ids.is_empty());
         assert_eq!(cloned.max_session_messages, 40);
         assert_eq!(cloned.compact_keep_recent, 20);
@@ -399,6 +408,7 @@ mod tests {
         config.openai_api_key = Some("sk-test".into());
         config.timezone = "US/Eastern".into();
         config.allowed_groups = vec![123, 456];
+        config.allowed_users = vec![777, 888]; // Test value assignment
         config.control_chat_ids = vec![999];
         assert_eq!(config.model, "claude-sonnet-4-5-20250929");
         assert_eq!(config.data_dir, "./microclaw.data");
@@ -406,6 +416,7 @@ mod tests {
         assert_eq!(config.openai_api_key.as_deref(), Some("sk-test"));
         assert_eq!(config.timezone, "US/Eastern");
         assert_eq!(config.allowed_groups, vec![123, 456]);
+        assert_eq!(config.allowed_users, vec![777, 888]);
         assert_eq!(config.control_chat_ids, vec![999]);
     }
 
@@ -434,6 +445,7 @@ mod tests {
         ));
         assert_eq!(config.max_document_size_mb, 100);
         assert_eq!(config.timezone, "UTC");
+        assert!(config.allowed_users.is_empty());
     }
 
     #[test]
@@ -603,6 +615,7 @@ api_key: key
 openai_api_key: sk-test
 timezone: US/Eastern
 allowed_groups: [123, 456]
+allowed_users: [1111, 2222]
 control_chat_ids: [999]
 max_session_messages: 60
 compact_keep_recent: 30
@@ -618,6 +631,7 @@ discord_allowed_channels: [111, 222]
         assert_eq!(config.openai_api_key.as_deref(), Some("sk-test"));
         assert_eq!(config.timezone, "US/Eastern");
         assert_eq!(config.allowed_groups, vec![123, 456]);
+        assert_eq!(config.allowed_users, vec![1111, 2222]);
         assert_eq!(config.control_chat_ids, vec![999]);
         assert_eq!(config.max_session_messages, 60);
         assert_eq!(config.compact_keep_recent, 30);
