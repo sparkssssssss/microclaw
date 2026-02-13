@@ -51,6 +51,35 @@ async fn handle_message(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let chat_id = msg.chat.id.0;
 
+    // ----------------------------------------------------------------------
+    // 新增：权限检查 (Permission Check)
+    // ----------------------------------------------------------------------
+    // 检查配置中是否存在允许的用户列表。如果列表不为空，则严格校验。
+    // 注意：需要在 AppConfig 结构体中添加 `pub allowed_users: Vec<u64>`
+    if !state.config.allowed_users.is_empty() {
+        // 获取消息发送者的 ID (u.id.0 是 u64 类型)
+        let sender_id = msg.from.as_ref().map(|u| u.id.0);
+
+        match sender_id {
+            Some(uid) => {
+                // 如果发送者 ID 不在允许列表中
+                if !state.config.allowed_users.contains(&uid) {
+                    info!("Blocking unauthorized message from user_id: {}", uid);
+                    // 发送拒绝提示
+                    let _ = bot.send_message(msg.chat.id, "🚫 Permission denied.").await;
+                    // 直接结束处理，不消耗后续资源
+                    return Ok(());
+                }
+            }
+            None => {
+                // 如果无法识别发送者（例如部分频道消息），在白名单模式下通常应当拒绝
+                info!("Blocking message from unknown sender (User ID not found)");
+                return Ok(());
+            }
+        }
+    }
+    // ----------------------------------------------------------------------
+
     // Extract content: text, photo, or voice
     let mut text = msg.text().unwrap_or("").to_string();
     let mut image_data: Option<(String, String)> = None; // (base64, media_type)
