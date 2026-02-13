@@ -373,6 +373,7 @@ fn default_config() -> Config {
         openai_api_key: None,
         timezone: "UTC".into(),
         allowed_groups: vec![],
+        allowed_users: vec![], 
         control_chat_ids: vec![],
         max_session_messages: 40,
         compact_keep_recent: 20,
