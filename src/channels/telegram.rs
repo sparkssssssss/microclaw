@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use teloxide::types::ParseMode;
 use teloxide::prelude::*;
 use teloxide::types::ChatAction;
 use tracing::{error, info};
@@ -515,8 +516,17 @@ fn split_response_text(text: &str) -> Vec<String> {
 pub async fn send_response(bot: &Bot, chat_id: ChatId, text: &str) {
     const MAX_LEN: usize = 4096;
 
+    // 尝试使用 Markdown 模式发送
+    // 注意：这里使用旧版 ParseMode::Markdown，容错率比 MarkdownV2 高
     if text.len() <= MAX_LEN {
-        let _ = bot.send_message(chat_id, text).await;
+        let result = bot.send_message(chat_id, text)
+            .parse_mode(ParseMode::Markdown)
+            .await;
+            
+        // 如果因为 Markdown 格式错误导致发送失败（极少情况），回退到纯文本发送
+        if result.is_err() {
+            let _ = bot.send_message(chat_id, text).await;
+        }
         return;
     }
 
@@ -525,11 +535,22 @@ pub async fn send_response(bot: &Bot, chat_id: ChatId, text: &str) {
         let chunk_len = if remaining.len() <= MAX_LEN {
             remaining.len()
         } else {
+            // 尝试在换行符处截断，避免切断 Markdown 标记
             remaining[..MAX_LEN].rfind('\n').unwrap_or(MAX_LEN)
         };
 
         let chunk = &remaining[..chunk_len];
-        let _ = bot.send_message(chat_id, chunk).await;
+        
+        // 发送分片
+        let result = bot.send_message(chat_id, chunk)
+            .parse_mode(ParseMode::Markdown)
+            .await;
+
+        // 失败回退逻辑
+        if result.is_err() {
+            let _ = bot.send_message(chat_id, chunk).await;
+        }
+
         remaining = &remaining[chunk_len..];
 
         if remaining.starts_with('\n') {
@@ -537,6 +558,7 @@ pub async fn send_response(bot: &Bot, chat_id: ChatId, text: &str) {
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
