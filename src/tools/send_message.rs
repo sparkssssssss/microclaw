@@ -62,22 +62,65 @@ impl SendMessageTool {
             .map_err(|e| format!("Failed to store sent message: {e}"))
     }
 
+    fn is_likely_image(file_path: &std::path::Path) -> bool {
+        file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| {
+                matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "heic"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn split_telegram_caption(caption: Option<String>) -> (Option<String>, Option<String>) {
+        const MAX_CAPTION_CHARS: usize = 1024;
+        let Some(caption) = caption else {
+            return (None, None);
+        };
+        let mut it = caption.chars();
+        let head: String = it.by_ref().take(MAX_CAPTION_CHARS).collect();
+        let tail: String = it.collect();
+        if tail.is_empty() {
+            (Some(head), None)
+        } else {
+            (Some(head), Some(tail))
+        }
+    }
+
     async fn send_telegram_attachment(
         &self,
         chat_id: i64,
         file_path: PathBuf,
         caption: Option<String>,
     ) -> Result<String, String> {
-        let mut req = self
+        let bot = self
             .bot
             .as_ref()
-            .ok_or_else(|| "telegram_bot_token not configured".to_string())?
-            .send_document(ChatId(chat_id), InputFile::file(file_path.clone()));
-        if let Some(c) = &caption {
-            req = req.caption(c.clone());
+            .ok_or_else(|| "telegram_bot_token not configured".to_string())?;
+        let (caption_for_attachment, overflow_text) = Self::split_telegram_caption(caption.clone());
+
+        if Self::is_likely_image(&file_path) {
+            let mut req = bot.send_photo(ChatId(chat_id), InputFile::file(file_path.clone()));
+            if let Some(c) = &caption_for_attachment {
+                req = req.caption(c.clone());
+            }
+            req.await
+                .map_err(|e| format!("Failed to send Telegram photo: {e}"))?;
+        } else {
+            let mut req = bot.send_document(ChatId(chat_id), InputFile::file(file_path.clone()));
+            if let Some(c) = &caption_for_attachment {
+                req = req.caption(c.clone());
+            }
+            req.await
+                .map_err(|e| format!("Failed to send Telegram attachment: {e}"))?;
         }
-        req.await
-            .map_err(|e| format!("Failed to send Telegram attachment: {e}"))?;
+
+        if let Some(extra) = overflow_text {
+            crate::telegram::send_response(bot, ChatId(chat_id), &extra).await;
+        }
 
         Ok(match caption {
             Some(c) => format!("[attachment:{}] {}", file_path.display(), c),
@@ -286,6 +329,34 @@ mod tests {
 
     fn cleanup(dir: &std::path::Path) {
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_is_likely_image_by_extension() {
+        assert!(SendMessageTool::is_likely_image(std::path::Path::new(
+            "/tmp/a.JPG"
+        )));
+        assert!(SendMessageTool::is_likely_image(std::path::Path::new(
+            "/tmp/a.png"
+        )));
+        assert!(!SendMessageTool::is_likely_image(std::path::Path::new(
+            "/tmp/a.pdf"
+        )));
+        assert!(!SendMessageTool::is_likely_image(std::path::Path::new(
+            "/tmp/noext"
+        )));
+    }
+
+    #[test]
+    fn test_split_telegram_caption_short_and_long() {
+        let (head1, tail1) = SendMessageTool::split_telegram_caption(Some("hello".into()));
+        assert_eq!(head1.as_deref(), Some("hello"));
+        assert!(tail1.is_none());
+
+        let long = "a".repeat(1200);
+        let (head2, tail2) = SendMessageTool::split_telegram_caption(Some(long));
+        assert_eq!(head2.as_ref().map(|s| s.chars().count()), Some(1024));
+        assert_eq!(tail2.as_ref().map(|s| s.chars().count()), Some(176));
     }
 
     #[tokio::test]
