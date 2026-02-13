@@ -185,6 +185,7 @@ function withWebsiteFrontmatter(id, title, body) {
 
 function main() {
   const checkOnly = process.argv.includes('--check');
+  const skipWebsite = process.argv.includes('--no-website');
 
   const tools = parseBuiltinTools();
   const configDefaults = parseConfigDefaults();
@@ -232,7 +233,7 @@ function main() {
     },
   ];
 
-  const outputs = [...rootOutputs, ...websiteOutputs];
+  const outputs = skipWebsite ? rootOutputs : [...rootOutputs, ...websiteOutputs];
 
   let changed = 0;
   for (const out of outputs) {
