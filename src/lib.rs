@@ -17,6 +17,7 @@ pub mod runtime;
 pub mod scheduler;
 pub mod setup;
 pub mod skills;
+pub(crate) mod text;
 pub mod tools;
 pub mod transcribe;
 pub mod usage;
