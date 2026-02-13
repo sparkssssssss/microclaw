@@ -46,6 +46,12 @@ pub fn default_codex_auth_path() -> PathBuf {
 }
 
 pub fn codex_auth_file_has_access_token() -> Result<bool, MicroClawError> {
+    if let Ok(token) = std::env::var("OPENAI_CODEX_ACCESS_TOKEN") {
+        if !token.trim().is_empty() {
+            return Ok(true);
+        }
+    }
+
     let path = default_codex_auth_path();
     if !path.exists() {
         return Ok(false);
@@ -62,12 +68,19 @@ pub fn codex_auth_file_has_access_token() -> Result<bool, MicroClawError> {
             path.display()
         ))
     })?;
-    Ok(parsed
+    let has_access_token = parsed
         .tokens
         .as_ref()
         .and_then(|tokens| tokens.access_token.as_ref())
         .map(|token| !token.trim().is_empty())
-        .unwrap_or(false))
+        .unwrap_or(false);
+    let has_openai_api_key = parsed
+        .openai_api_key
+        .as_deref()
+        .map(str::trim)
+        .map(|key| !key.is_empty())
+        .unwrap_or(false);
+    Ok(has_access_token || has_openai_api_key)
 }
 
 pub fn resolve_openai_codex_auth(
@@ -285,6 +298,14 @@ fn is_jwt_expired(token: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned")
+    }
+
     #[test]
     fn test_provider_allows_empty_api_key() {
         assert!(provider_allows_empty_api_key("ollama"));
@@ -297,5 +318,21 @@ mod tests {
         assert!(is_openai_codex_provider("openai-codex"));
         assert!(is_openai_codex_provider("OPENAI-CODEX"));
         assert!(!is_openai_codex_provider("openai"));
+    }
+
+    #[test]
+    fn test_codex_auth_file_has_access_token_accepts_env_var() {
+        let _guard = env_lock();
+        let prev_access = std::env::var("OPENAI_CODEX_ACCESS_TOKEN").ok();
+        std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", "env-token");
+
+        let has = codex_auth_file_has_access_token().unwrap();
+
+        if let Some(prev) = prev_access {
+            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", prev);
+        } else {
+            std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
+        }
+        assert!(has);
     }
 }

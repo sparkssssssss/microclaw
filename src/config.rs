@@ -719,6 +719,32 @@ mod tests {
     }
 
     #[test]
+    fn test_post_deserialize_openai_codex_allows_env_access_token() {
+        let _guard = env_lock();
+        let prev_codex_home = std::env::var("CODEX_HOME").ok();
+        let prev_access = std::env::var("OPENAI_CODEX_ACCESS_TOKEN").ok();
+        std::env::remove_var("CODEX_HOME");
+        std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", "env-token");
+
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: openai-codex\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.post_deserialize().unwrap();
+
+        if let Some(prev) = prev_codex_home {
+            std::env::set_var("CODEX_HOME", prev);
+        } else {
+            std::env::remove_var("CODEX_HOME");
+        }
+        if let Some(prev) = prev_access {
+            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", prev);
+        } else {
+            std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
+        }
+
+        assert_eq!(config.llm_provider, "openai-codex");
+    }
+
+    #[test]
     fn test_post_deserialize_ollama_default_model_and_empty_key() {
         let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: ollama\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
