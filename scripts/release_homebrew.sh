@@ -187,8 +187,7 @@ git add .
 git commit -m "bump version to $NEW_VERSION"
 git push
 
-RELEASE_COMMIT_SHA="$(git rev-parse HEAD)"
-echo "Release commit pushed: ${RELEASE_COMMIT_SHA}"
+echo "Release commit pushed: $(git rev-parse HEAD)"
 
 # --- Finalize release (blocking) ---
 "$ROOT_DIR/scripts/release_finalize.sh" \
@@ -197,10 +196,8 @@ echo "Release commit pushed: ${RELEASE_COMMIT_SHA}"
   --tap-repo "$TAP_REPO" \
   --formula-path "$FORMULA_PATH" \
   --github-repo "$GITHUB_REPO" \
-  --prev-tag "$PREV_TAG" \
   --new-version "$NEW_VERSION" \
   --tag "$TAG" \
   --tarball-path "$TARBALL_PATH" \
   --tarball-name "$TARBALL_NAME" \
-  --sha256 "$SHA256" \
-  --release-commit-sha "$RELEASE_COMMIT_SHA"
+  --sha256 "$SHA256"
