@@ -19,6 +19,10 @@ An agentic AI assistant for chat surfaces, inspired by [nanoclaw](https://github
 
 ## How it works
 
+<p align="center">
+  <img src="docs/assets/readme/agent-loop.svg" alt="MicroClaw agent loop diagram" width="92%" />
+</p>
+
 ```
 Chat message (via platform adapter)
     |
@@ -103,6 +107,10 @@ node scripts/generate_docs_artifacts.mjs
 
 ## Memory
 
+<p align="center">
+  <img src="docs/assets/readme/memory-architecture.svg" alt="MicroClaw memory architecture diagram" width="92%" />
+</p>
+
 MicroClaw maintains persistent memory via `AGENTS.md` files:
 
 ```
@@ -152,6 +160,10 @@ LIMIT 50;
 ```
 
 ## Skills
+
+<p align="center">
+  <img src="docs/assets/readme/skills-lifecycle.svg" alt="MicroClaw skill lifecycle diagram" width="92%" />
+</p>
 
 MicroClaw supports the [Anthropic Agent Skills](https://github.com/anthropics/skills) standard. Skills are modular packages that give the bot specialized capabilities for specific tasks.
 
@@ -240,6 +252,10 @@ Look for log lines like `MCP server '...' connected (...)`.
 
 ## Plan & Execute
 
+<p align="center">
+  <img src="docs/assets/readme/plan-execute.svg" alt="MicroClaw plan and execute diagram" width="92%" />
+</p>
+
 For complex, multi-step tasks, the bot can create a plan and track progress:
 
 ```
@@ -255,6 +271,10 @@ Bot: [creates a todo plan, then executes each step, updating progress]
 Todo lists are stored at `microclaw.data/runtime/groups/{chat_id}/TODO.json` and persist across sessions.
 
 ## Scheduling
+
+<p align="center">
+  <img src="docs/assets/readme/task-scheduler.svg" alt="MicroClaw scheduling flow diagram" width="92%" />
+</p>
 
 The bot supports scheduled tasks via natural language:
 

@@ -18,6 +18,10 @@
 
 ## 工作原理
 
+<p align="center">
+  <img src="docs/assets/readme/agent-loop.svg" alt="MicroClaw 智能体循环图" width="92%" />
+</p>
+
 ```
 聊天消息（通过平台适配器接入）
     |
@@ -92,6 +96,10 @@
 
 ## 记忆系统
 
+<p align="center">
+  <img src="docs/assets/readme/memory-architecture.svg" alt="MicroClaw 记忆架构图" width="92%" />
+</p>
+
 MicroClaw 通过 `AGENTS.md` 文件维护持久化记忆：
 
 ```
@@ -142,6 +150,10 @@ LIMIT 50;
 
 ## 技能系统
 
+<p align="center">
+  <img src="docs/assets/readme/skills-lifecycle.svg" alt="MicroClaw 技能生命周期图" width="92%" />
+</p>
+
 MicroClaw 支持 [Anthropic Agent Skills](https://github.com/anthropics/skills) 标准。技能是为特定任务提供专业能力的模块化包。
 
 ```
@@ -173,6 +185,10 @@ microclaw.data/skills/
 
 ## 计划与执行
 
+<p align="center">
+  <img src="docs/assets/readme/plan-execute.svg" alt="MicroClaw 计划执行流程图" width="92%" />
+</p>
+
 对于复杂的多步骤任务，机器人可以创建计划并跟踪进度：
 
 ```
@@ -188,6 +204,10 @@ Bot: [创建 todo 计划，然后逐步执行，更新进度]
 Todo 列表存储在 `microclaw.data/runtime/groups/{chat_id}/TODO.json`，跨会话持久化。
 
 ## 定时任务
+
+<p align="center">
+  <img src="docs/assets/readme/task-scheduler.svg" alt="MicroClaw 定时任务流程图" width="92%" />
+</p>
 
 机器人支持通过自然语言管理定时任务：
 
