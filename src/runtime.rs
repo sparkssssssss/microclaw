@@ -7,7 +7,7 @@ use tracing::warn;
 
 use crate::channel_adapter::ChannelRegistry;
 use crate::channels::telegram::TelegramChannelConfig;
-use crate::channels::{DiscordAdapter, SlackAdapter, TelegramAdapter};
+use crate::channels::{DiscordAdapter, FeishuAdapter, SlackAdapter, TelegramAdapter};
 use crate::config::Config;
 use crate::db::Database;
 use crate::embedding::EmbeddingProvider;
@@ -78,6 +78,18 @@ pub async fn run(
         }
     }
 
+    let mut has_feishu = false;
+    if let Some(feishu_cfg) = config.channel_config::<crate::channels::feishu::FeishuChannelConfig>("feishu") {
+        if !feishu_cfg.app_id.trim().is_empty() && !feishu_cfg.app_secret.trim().is_empty() {
+            has_feishu = true;
+            registry.register(Arc::new(FeishuAdapter::new(
+                feishu_cfg.app_id.clone(),
+                feishu_cfg.app_secret.clone(),
+                feishu_cfg.domain.clone(),
+            )));
+        }
+    }
+
     if config.web_enabled {
         registry.register(Arc::new(WebAdapter));
     }
@@ -121,6 +133,14 @@ pub async fn run(
         });
     }
 
+    if has_feishu {
+        let feishu_state = state.clone();
+        info!("Starting Feishu bot");
+        tokio::spawn(async move {
+            crate::channels::feishu::start_feishu_bot(feishu_state).await;
+        });
+    }
+
     if state.config.web_enabled {
         let web_state = state.clone();
         info!(
@@ -134,7 +154,7 @@ pub async fn run(
 
     if let Some(bot) = telegram_bot {
         crate::telegram::start_telegram_bot(state, bot).await
-    } else if state.config.web_enabled || discord_token.is_some() || has_slack {
+    } else if state.config.web_enabled || discord_token.is_some() || has_slack || has_feishu {
         info!("Running without Telegram adapter; waiting for other channels");
         tokio::signal::ctrl_c()
             .await
@@ -142,7 +162,7 @@ pub async fn run(
         Ok(())
     } else {
         Err(anyhow!(
-            "No channel is enabled. Configure Telegram, Discord, Slack, or web_enabled=true."
+            "No channel is enabled. Configure Telegram, Discord, Slack, Feishu, or web_enabled=true."
         ))
     }
 }

@@ -86,6 +86,19 @@ compact_keep_recent: 20
 #     app_token: "xapp-..."
 #     allowed_channels: []
 
+# Feishu / Lark (optional) — configure under `channels:`
+# channels:
+#   feishu:
+#     app_id: "cli_xxx"
+#     app_secret: "xxx"
+#     connection_mode: "websocket"   # "websocket" (default) or "webhook"
+#     domain: "feishu"               # "feishu" (China), "lark" (international), or custom URL
+#     allowed_chats: []
+#     # Webhook-only settings:
+#     # webhook_path: "/feishu/events"
+#     # verification_token: ""
+#     # encrypt_key: ""
+
 # Local web UI (optional)
 # Enable built-in local web chat + config panel
 web_enabled: true
