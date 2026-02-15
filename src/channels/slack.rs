@@ -263,20 +263,15 @@ async fn send_slack_response(bot_token: &str, channel: &str, text: &str) -> Resu
 
 /// Start the Slack bot using Socket Mode.
 pub async fn start_slack_bot(app_state: Arc<AppState>) {
-    let app_token = match app_state.config.slack_app_token.as_deref() {
-        Some(t) if !t.trim().is_empty() => t.to_string(),
-        _ => {
-            error!("Slack app token not configured");
+    let slack_cfg: SlackChannelConfig = match app_state.config.channel_config("slack") {
+        Some(c) => c,
+        None => {
+            error!("Slack channel not configured");
             return;
         }
     };
-    let bot_token = match app_state.config.slack_bot_token.as_deref() {
-        Some(t) if !t.trim().is_empty() => t.to_string(),
-        _ => {
-            error!("Slack bot token not configured");
-            return;
-        }
-    };
+    let app_token = slack_cfg.app_token;
+    let bot_token = slack_cfg.bot_token;
 
     let bot_user_id = match resolve_bot_user_id(&bot_token).await {
         Ok(id) => {
@@ -471,14 +466,12 @@ async fn handle_slack_message(
     }
 
     // Check allowed channels filter
-    if !app_state.config.slack_allowed_channels.is_empty()
-        && !app_state
-            .config
-            .slack_allowed_channels
-            .iter()
-            .any(|c| c == channel)
-    {
-        return;
+    if let Some(slack_cfg) = app_state.config.channel_config::<SlackChannelConfig>("slack") {
+        if !slack_cfg.allowed_channels.is_empty()
+            && !slack_cfg.allowed_channels.iter().any(|c| c == channel)
+        {
+            return;
+        }
     }
 
     // Store incoming message

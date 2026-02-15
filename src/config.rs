@@ -118,10 +118,7 @@ pub struct ModelPrice {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_telegram_bot_token")]
-    pub telegram_bot_token: String,
-    #[serde(default = "default_bot_username")]
-    pub bot_username: String,
+    // --- LLM / API ---
     #[serde(default = "default_llm_provider")]
     pub llm_provider: String,
     #[serde(default = "default_api_key")]
@@ -140,30 +137,26 @@ pub struct Config {
     pub max_document_size_mb: u64,
     #[serde(default = "default_memory_token_budget")]
     pub memory_token_budget: usize,
+    #[serde(default = "default_max_session_messages")]
+    pub max_session_messages: usize,
+    #[serde(default = "default_compact_keep_recent")]
+    pub compact_keep_recent: usize,
+    #[serde(default)]
+    pub show_thinking: bool,
+
+    // --- Paths & environment ---
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
     #[serde(default = "default_working_dir")]
     pub working_dir: String,
     #[serde(default = "default_working_dir_isolation")]
     pub working_dir_isolation: WorkingDirIsolation,
-    #[serde(default)]
-    pub openai_api_key: Option<String>,
     #[serde(default = "default_timezone")]
     pub timezone: String,
-    #[serde(default)]
-    pub allowed_groups: Vec<i64>,
     #[serde(default = "default_control_chat_ids")]
     pub control_chat_ids: Vec<i64>,
-    #[serde(default = "default_max_session_messages")]
-    pub max_session_messages: usize,
-    #[serde(default = "default_compact_keep_recent")]
-    pub compact_keep_recent: usize,
-    #[serde(default)]
-    pub discord_bot_token: Option<String>,
-    #[serde(default)]
-    pub discord_allowed_channels: Vec<u64>,
-    #[serde(default)]
-    pub show_thinking: bool,
+
+    // --- Web UI ---
     #[serde(default = "default_web_enabled")]
     pub web_enabled: bool,
     #[serde(default = "default_web_host")]
@@ -182,8 +175,8 @@ pub struct Config {
     pub web_run_history_limit: usize,
     #[serde(default = "default_web_session_idle_ttl_seconds")]
     pub web_session_idle_ttl_seconds: u64,
-    #[serde(default = "default_model_prices")]
-    pub model_prices: Vec<ModelPrice>,
+
+    // --- Embedding ---
     #[serde(default)]
     pub embedding_provider: Option<String>,
     #[serde(default)]
@@ -194,28 +187,43 @@ pub struct Config {
     pub embedding_model: Option<String>,
     #[serde(default)]
     pub embedding_dim: Option<usize>,
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+
+    // --- Pricing ---
+    #[serde(default = "default_model_prices")]
+    pub model_prices: Vec<ModelPrice>,
+
+    // --- Reflector ---
     #[serde(default = "default_reflector_enabled")]
     pub reflector_enabled: bool,
     #[serde(default = "default_reflector_interval_mins")]
     pub reflector_interval_mins: u64,
+
+    // --- Soul ---
     /// Path to a SOUL.md file that defines the bot's personality, voice, and values.
     /// If not set, looks for SOUL.md in data_dir root, then current directory.
     #[serde(default = "default_soul_path")]
     pub soul_path: Option<String>,
-    /// Slack Bot Token (xoxb-...) for sending messages via Web API
-    #[serde(default)]
-    pub slack_bot_token: Option<String>,
-    /// Slack App-Level Token (xapp-...) required for Socket Mode
-    #[serde(default)]
-    pub slack_app_token: Option<String>,
-    /// Slack channel IDs to listen in (empty = all)
-    #[serde(default)]
-    pub slack_allowed_channels: Vec<String>,
+
+    // --- Channel registry (new dynamic config) ---
     /// Per-channel configuration. Keys are channel names (e.g. "telegram", "discord", "slack", "web").
     /// Each value is channel-specific config deserialized by the adapter.
-    /// If empty, synthesized from legacy flat fields in post_deserialize().
+    /// If empty, synthesized from legacy flat fields below in post_deserialize().
     #[serde(default)]
     pub channels: HashMap<String, serde_yaml::Value>,
+
+    // --- Legacy channel fields (deprecated, use `channels:` instead) ---
+    #[serde(default = "default_telegram_bot_token")]
+    pub telegram_bot_token: String,
+    #[serde(default = "default_bot_username")]
+    pub bot_username: String,
+    #[serde(default)]
+    pub allowed_groups: Vec<i64>,
+    #[serde(default)]
+    pub discord_bot_token: Option<String>,
+    #[serde(default)]
+    pub discord_allowed_channels: Vec<u64>,
 }
 
 impl Config {
@@ -386,18 +394,6 @@ impl Config {
             }
         }
 
-        // Trim empty Slack tokens
-        if let Some(v) = &self.slack_bot_token {
-            if v.trim().is_empty() {
-                self.slack_bot_token = None;
-            }
-        }
-        if let Some(v) = &self.slack_app_token {
-            if v.trim().is_empty() {
-                self.slack_app_token = None;
-            }
-        }
-
         // Synthesize `channels` map from legacy flat fields if empty
         if self.channels.is_empty() {
             if !self.telegram_bot_token.trim().is_empty() {
@@ -418,19 +414,6 @@ impl Config {
                         serde_yaml::to_value(serde_json::json!({
                             "bot_token": token,
                             "allowed_channels": self.discord_allowed_channels,
-                        }))
-                        .unwrap(),
-                    );
-                }
-            }
-            if let Some(ref app_token) = self.slack_app_token {
-                if !app_token.trim().is_empty() {
-                    self.channels.insert(
-                        "slack".into(),
-                        serde_yaml::to_value(serde_json::json!({
-                            "bot_token": self.slack_bot_token.as_deref().unwrap_or(""),
-                            "app_token": app_token,
-                            "allowed_channels": self.slack_allowed_channels,
                         }))
                         .unwrap(),
                     );
@@ -459,17 +442,12 @@ impl Config {
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false)
             || self.channels.contains_key("discord");
-        let has_slack = self
-            .slack_app_token
-            .as_deref()
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-            || self.channels.contains_key("slack");
+        let has_slack = self.channels.contains_key("slack");
         let has_web = self.web_enabled || self.channels.contains_key("web");
 
         if !(has_telegram || has_discord || has_slack || has_web) {
             return Err(MicroClawError::Config(
-                "At least one channel must be enabled: telegram_bot_token, discord_bot_token, slack_app_token, or web_enabled=true".into(),
+                "At least one channel must be enabled: telegram_bot_token, discord_bot_token, channels.slack, or web_enabled=true".into(),
             ));
         }
         if self.api_key.is_empty() && !provider_allows_empty_api_key(&self.llm_provider) {
@@ -597,9 +575,6 @@ mod tests {
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
-            slack_bot_token: None,
-            slack_app_token: None,
-            slack_allowed_channels: vec![],
             channels: HashMap::new(),
         }
     }

@@ -1478,9 +1478,6 @@ mod tests {
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
-            slack_bot_token: None,
-            slack_app_token: None,
-            slack_allowed_channels: vec![],
             channels: std::collections::HashMap::new(),
         };
         cfg.data_dir = base_dir.to_string_lossy().to_string();
@@ -1777,9 +1774,6 @@ mod tests {
         let config = Config {
             data_dir: base_dir.to_string_lossy().to_string(),
             soul_path: None,
-            slack_bot_token: None,
-            slack_app_token: None,
-            slack_allowed_channels: vec![],
             telegram_bot_token: "tok".into(),
             bot_username: "bot".into(),
             llm_provider: "anthropic".into(),
@@ -1879,9 +1873,6 @@ mod tests {
             embedding_dim: None,
             reflector_enabled: true,
             reflector_interval_mins: 15,
-            slack_bot_token: None,
-            slack_app_token: None,
-            slack_allowed_channels: vec![],
             channels: std::collections::HashMap::new(),
         };
 

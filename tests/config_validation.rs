@@ -46,9 +46,6 @@ fn minimal_config() -> Config {
         reflector_enabled: true,
         reflector_interval_mins: 15,
         soul_path: None,
-        slack_bot_token: None,
-        slack_app_token: None,
-        slack_allowed_channels: vec![],
         channels: std::collections::HashMap::new(),
     }
 }
