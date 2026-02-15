@@ -1347,6 +1347,7 @@ async fn compact_messages(
 #[cfg(test)]
 mod tests {
     use super::{build_db_memory_context, process_with_agent, AgentRequestContext};
+    use crate::channel_adapter::ChannelRegistry;
     use crate::config::{Config, WorkingDirIsolation};
     use crate::db::{Database, StoredMessage};
     use crate::error::MicroClawError;
@@ -1356,9 +1357,9 @@ mod tests {
     use crate::runtime::AppState;
     use crate::skills::SkillManager;
     use crate::tools::ToolRegistry;
+    use crate::web::WebAdapter;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use teloxide::prelude::Bot;
 
     struct DummyLlm;
 
@@ -1477,20 +1478,26 @@ mod tests {
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
+            slack_bot_token: None,
+            slack_app_token: None,
+            slack_allowed_channels: vec![],
+            channels: std::collections::HashMap::new(),
         };
         cfg.data_dir = base_dir.to_string_lossy().to_string();
         cfg.working_dir = base_dir.join("tmp").to_string_lossy().to_string();
         let db = Arc::new(Database::new(runtime_dir.to_str().unwrap()).unwrap());
-        let bot = Bot::new("123456:TEST_TOKEN");
+        let mut registry = ChannelRegistry::new();
+        registry.register(Arc::new(WebAdapter));
+        let channel_registry = Arc::new(registry);
         Arc::new(AppState {
             config: cfg.clone(),
-            telegram_bot: Some(bot.clone()),
+            channel_registry: channel_registry.clone(),
             db: db.clone(),
             memory: MemoryManager::new(runtime_dir.to_str().unwrap()),
             skills: SkillManager::from_skills_dir(&cfg.skills_data_dir()),
             llm,
             embedding: None,
-            tools: ToolRegistry::new(&cfg, Some(bot), db),
+            tools: ToolRegistry::new(&cfg, channel_registry, db),
         })
     }
 
@@ -1770,6 +1777,9 @@ mod tests {
         let config = Config {
             data_dir: base_dir.to_string_lossy().to_string(),
             soul_path: None,
+            slack_bot_token: None,
+            slack_app_token: None,
+            slack_allowed_channels: vec![],
             telegram_bot_token: "tok".into(),
             bot_username: "bot".into(),
             llm_provider: "anthropic".into(),
@@ -1809,6 +1819,7 @@ mod tests {
             embedding_dim: None,
             reflector_enabled: true,
             reflector_interval_mins: 15,
+            channels: std::collections::HashMap::new(),
         };
 
         let soul = super::load_soul_content(&config, 999);
@@ -1868,6 +1879,10 @@ mod tests {
             embedding_dim: None,
             reflector_enabled: true,
             reflector_interval_mins: 15,
+            slack_bot_token: None,
+            slack_app_token: None,
+            slack_allowed_channels: vec![],
+            channels: std::collections::HashMap::new(),
         };
 
         let soul = super::load_soul_content(&config, 999);

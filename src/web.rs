@@ -18,15 +18,40 @@ use tracing::{error, info};
 use crate::agent_engine::{
     process_with_agent, process_with_agent_with_events, AgentEvent, AgentRequestContext,
 };
-use crate::channel::{
-    deliver_and_store_bot_message, get_chat_routing, session_source_for_chat, ChatChannel,
-};
+use crate::channel::{deliver_and_store_bot_message, get_chat_routing, session_source_for_chat};
+use crate::channel::ConversationKind;
+use crate::channel_adapter::{ChannelAdapter, ChannelRegistry};
 use crate::config::{Config, WorkingDirIsolation};
 use crate::db::{call_blocking, ChatSummary, StoredMessage};
 use crate::runtime::AppState;
 use crate::usage::build_usage_report;
 
 static WEB_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web/dist");
+
+pub struct WebAdapter;
+
+#[async_trait::async_trait]
+impl ChannelAdapter for WebAdapter {
+    fn name(&self) -> &str {
+        "web"
+    }
+
+    fn chat_type_routes(&self) -> Vec<(&str, ConversationKind)> {
+        vec![("web", ConversationKind::Private)]
+    }
+
+    fn is_local_only(&self) -> bool {
+        true
+    }
+
+    fn allows_cross_chat(&self) -> bool {
+        false
+    }
+
+    async fn send_text(&self, _external_chat_id: &str, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 struct WebState {
@@ -609,8 +634,8 @@ async fn api_update_config(
     })))
 }
 
-fn map_chat_to_session(chat: ChatSummary) -> SessionItem {
-    let source = session_source_for_chat(&chat.chat_type, chat.chat_title.as_deref());
+fn map_chat_to_session(registry: &ChannelRegistry, chat: ChatSummary) -> SessionItem {
+    let source = session_source_for_chat(registry, &chat.chat_type, chat.chat_title.as_deref());
 
     let fallback = format!("{}:{}", source, chat.chat_id);
     let mut label = chat.chat_title.clone().unwrap_or_else(|| fallback.clone());
@@ -690,7 +715,7 @@ async fn api_sessions(
 
     let sessions = chats
         .into_iter()
-        .map(map_chat_to_session)
+        .map(|c| map_chat_to_session(&state.app_state.channel_registry, c))
         .collect::<Vec<_>>();
     Ok(Json(json!({ "ok": true, "sessions": sessions })))
 }
@@ -1244,10 +1269,10 @@ async fn send_and_store_response_with_events(
         .to_string();
 
     if let Some(explicit_chat_id) = parsed_chat_id {
-        let is_web = get_chat_routing(state.app_state.db.clone(), explicit_chat_id)
+        let is_web = get_chat_routing(&state.app_state.channel_registry, state.app_state.db.clone(), explicit_chat_id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-            .map(|r| r.channel == ChatChannel::Web)
+            .map(|r| r.channel_name == "web")
             .unwrap_or(false);
         if !is_web {
             return Err((
@@ -1301,8 +1326,7 @@ async fn send_and_store_response_with_events(
     };
 
     deliver_and_store_bot_message(
-        state.app_state.telegram_bot.as_ref(),
-        Some(&state.app_state.config),
+        &state.app_state.channel_registry,
         state.app_state.db.clone(),
         &state.app_state.config.bot_username,
         chat_id,
@@ -1329,10 +1353,10 @@ async fn api_reset(
     let session_key = normalize_session_key(body.session_key.as_deref());
     let chat_id = resolve_chat_id_for_session_key(&state, &session_key).await?;
 
-    let is_web = get_chat_routing(state.app_state.db.clone(), chat_id)
+    let is_web = get_chat_routing(&state.app_state.channel_registry, state.app_state.db.clone(), chat_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-        .map(|r| r.channel == ChatChannel::Web)
+        .map(|r| r.channel_name == "web")
         .unwrap_or(false);
 
     let deleted = if is_web {
@@ -1470,13 +1494,13 @@ mod tests {
     use crate::config::{Config, WorkingDirIsolation};
     use crate::db::call_blocking;
     use crate::llm::LlmProvider;
+    use crate::channel_adapter::ChannelRegistry;
     use crate::{db::Database, memory::MemoryManager, skills::SkillManager, tools::ToolRegistry};
     use crate::{error::MicroClawError, llm_types::ResponseContentBlock};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use teloxide::Bot;
     use tower::ServiceExt;
 
     #[test]
@@ -1634,6 +1658,10 @@ mod tests {
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
+            slack_bot_token: None,
+            slack_app_token: None,
+            slack_allowed_channels: vec![],
+            channels: std::collections::HashMap::new(),
         };
         let dir = std::env::temp_dir().join(format!("microclaw_webtest_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1642,16 +1670,18 @@ mod tests {
         let runtime_dir = cfg.runtime_data_dir();
         std::fs::create_dir_all(&runtime_dir).unwrap();
         let db = Arc::new(Database::new(&runtime_dir).unwrap());
-        let bot = Bot::new("123456:TEST_TOKEN");
+        let mut registry = ChannelRegistry::new();
+        registry.register(Arc::new(WebAdapter));
+        let channel_registry = Arc::new(registry);
         let state = AppState {
             config: cfg.clone(),
-            telegram_bot: Some(bot.clone()),
+            channel_registry: channel_registry.clone(),
             db: db.clone(),
             memory: MemoryManager::new(&runtime_dir),
             skills: SkillManager::from_skills_dir(&cfg.skills_data_dir()),
             llm,
             embedding: None,
-            tools: ToolRegistry::new(&cfg, Some(bot), db),
+            tools: ToolRegistry::new(&cfg, channel_registry, db),
         };
         Arc::new(state)
     }
@@ -2076,9 +2106,14 @@ mod tests {
         let external = call_blocking(db.clone(), move |d| d.get_chat_external_id(chat_id))
             .await
             .unwrap();
-        let routing = get_chat_routing(db, chat_id).await.unwrap();
+        let test_registry = {
+            let mut r = ChannelRegistry::new();
+            r.register(Arc::new(WebAdapter));
+            Arc::new(r)
+        };
+        let routing = get_chat_routing(&test_registry, db, chat_id).await.unwrap();
 
-        assert_eq!(routing.map(|r| r.channel), Some(ChatChannel::Web));
+        assert_eq!(routing.map(|r| r.channel_name), Some("web".to_string()));
         assert_eq!(external.as_deref(), Some("scoped-main"));
     }
 }

@@ -79,6 +79,14 @@ compact_keep_recent: 20
 # discord_bot_token: ""
 # discord_allowed_channels: []
 
+# Slack (optional, Socket Mode)
+# Bot token (xoxb-...) for sending messages
+# slack_bot_token: ""
+# App-level token (xapp-...) for Socket Mode connection
+# slack_app_token: ""
+# Channel IDs to listen in (empty = all)
+# slack_allowed_channels: []
+
 # Local web UI (optional)
 # Enable built-in local web chat + config panel
 web_enabled: true

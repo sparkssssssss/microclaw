@@ -1,9 +1,13 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
 use crate::codex_auth::{
     codex_auth_file_has_access_token, is_openai_codex_provider, provider_allows_empty_api_key,
 };
 use crate::error::MicroClawError;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 fn default_telegram_bot_token() -> String {
     String::new()
@@ -198,6 +202,20 @@ pub struct Config {
     /// If not set, looks for SOUL.md in data_dir root, then current directory.
     #[serde(default = "default_soul_path")]
     pub soul_path: Option<String>,
+    /// Slack Bot Token (xoxb-...) for sending messages via Web API
+    #[serde(default)]
+    pub slack_bot_token: Option<String>,
+    /// Slack App-Level Token (xapp-...) required for Socket Mode
+    #[serde(default)]
+    pub slack_app_token: Option<String>,
+    /// Slack channel IDs to listen in (empty = all)
+    #[serde(default)]
+    pub slack_allowed_channels: Vec<String>,
+    /// Per-channel configuration. Keys are channel names (e.g. "telegram", "discord", "slack", "web").
+    /// Each value is channel-specific config deserialized by the adapter.
+    /// If empty, synthesized from legacy flat fields in post_deserialize().
+    #[serde(default)]
+    pub channels: HashMap<String, serde_yaml::Value>,
 }
 
 impl Config {
@@ -368,17 +386,90 @@ impl Config {
             }
         }
 
+        // Trim empty Slack tokens
+        if let Some(v) = &self.slack_bot_token {
+            if v.trim().is_empty() {
+                self.slack_bot_token = None;
+            }
+        }
+        if let Some(v) = &self.slack_app_token {
+            if v.trim().is_empty() {
+                self.slack_app_token = None;
+            }
+        }
+
+        // Synthesize `channels` map from legacy flat fields if empty
+        if self.channels.is_empty() {
+            if !self.telegram_bot_token.trim().is_empty() {
+                self.channels.insert(
+                    "telegram".into(),
+                    serde_yaml::to_value(serde_json::json!({
+                        "bot_token": self.telegram_bot_token,
+                        "bot_username": self.bot_username,
+                        "allowed_groups": self.allowed_groups,
+                    }))
+                    .unwrap(),
+                );
+            }
+            if let Some(ref token) = self.discord_bot_token {
+                if !token.trim().is_empty() {
+                    self.channels.insert(
+                        "discord".into(),
+                        serde_yaml::to_value(serde_json::json!({
+                            "bot_token": token,
+                            "allowed_channels": self.discord_allowed_channels,
+                        }))
+                        .unwrap(),
+                    );
+                }
+            }
+            if let Some(ref app_token) = self.slack_app_token {
+                if !app_token.trim().is_empty() {
+                    self.channels.insert(
+                        "slack".into(),
+                        serde_yaml::to_value(serde_json::json!({
+                            "bot_token": self.slack_bot_token.as_deref().unwrap_or(""),
+                            "app_token": app_token,
+                            "allowed_channels": self.slack_allowed_channels,
+                        }))
+                        .unwrap(),
+                    );
+                }
+            }
+            if self.web_enabled {
+                self.channels.insert(
+                    "web".into(),
+                    serde_yaml::to_value(serde_json::json!({
+                        "enabled": true,
+                        "host": self.web_host,
+                        "port": self.web_port,
+                        "auth_token": self.web_auth_token,
+                    }))
+                    .unwrap(),
+                );
+            }
+        }
+
         // Validate required fields
-        let has_telegram = !self.telegram_bot_token.trim().is_empty();
+        let has_telegram = !self.telegram_bot_token.trim().is_empty()
+            || self.channels.contains_key("telegram");
         let has_discord = self
             .discord_bot_token
             .as_deref()
             .map(|v| !v.trim().is_empty())
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || self.channels.contains_key("discord");
+        let has_slack = self
+            .slack_app_token
+            .as_deref()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+            || self.channels.contains_key("slack");
+        let has_web = self.web_enabled || self.channels.contains_key("web");
 
-        if !(has_telegram || has_discord || self.web_enabled) {
+        if !(has_telegram || has_discord || has_slack || has_web) {
             return Err(MicroClawError::Config(
-                "At least one channel must be enabled: telegram_bot_token, discord_bot_token, or web_enabled=true".into(),
+                "At least one channel must be enabled: telegram_bot_token, discord_bot_token, slack_app_token, or web_enabled=true".into(),
             ));
         }
         if self.api_key.is_empty() && !provider_allows_empty_api_key(&self.llm_provider) {
@@ -409,6 +500,13 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// Deserialize a typed channel config from the `channels` map.
+    pub fn channel_config<T: DeserializeOwned>(&self, name: &str) -> Option<T> {
+        self.channels
+            .get(name)
+            .and_then(|v| serde_yaml::from_value(v.clone()).ok())
     }
 
     pub fn model_price(&self, model: &str) -> Option<&ModelPrice> {
@@ -499,6 +597,10 @@ mod tests {
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
+            slack_bot_token: None,
+            slack_app_token: None,
+            slack_allowed_channels: vec![],
+            channels: HashMap::new(),
         }
     }
 

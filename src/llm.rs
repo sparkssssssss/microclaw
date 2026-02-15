@@ -1992,6 +1992,10 @@ mod tests {
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
+            slack_bot_token: None,
+            slack_app_token: None,
+            slack_allowed_channels: vec![],
+            channels: std::collections::HashMap::new(),
         };
         // Should not panic
         let _provider = create_provider(&config);
@@ -2041,6 +2045,10 @@ mod tests {
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
+            slack_bot_token: None,
+            slack_app_token: None,
+            slack_allowed_channels: vec![],
+            channels: std::collections::HashMap::new(),
         };
         let _provider = create_provider(&config);
     }
@@ -2155,6 +2163,10 @@ mod tests {
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
+            slack_bot_token: None,
+            slack_app_token: None,
+            slack_allowed_channels: vec![],
+            channels: std::collections::HashMap::new(),
         };
         let provider = OpenAiProvider::new(&config);
         let messages = vec![Message {
@@ -2308,6 +2320,10 @@ mod tests {
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
+            slack_bot_token: None,
+            slack_app_token: None,
+            slack_allowed_channels: vec![],
+            channels: std::collections::HashMap::new(),
         };
         let provider = OpenAiProvider::new(&config);
         let messages = vec![Message {
