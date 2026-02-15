@@ -1,6 +1,6 @@
 [package]
 name = "microclaw"
-version = "0.0.67"
+version = "0.0.68"
 edition = "2021"
 license = "MIT"
 
