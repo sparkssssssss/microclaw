@@ -132,8 +132,54 @@ pub struct McpServer {
     tools_cache_updated_at: StdMutex<Option<Instant>>,
 }
 
+/// Resolve a command name to its full path. On Windows, also checks for
+/// `.cmd` and `.exe` variants in common locations when PATH lookup fails.
+fn resolve_command(command: &str) -> String {
+    // Already a full path — use as-is
+    if std::path::Path::new(command).is_absolute() {
+        return command.to_string();
+    }
+
+    // Try PATH lookup via `which` (Unix) or `where` (Windows)
+    if let Ok(output) = std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
+        .arg(command)
+        .output()
+    {
+        if output.status.success() {
+            let resolved = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !resolved.is_empty() {
+                return resolved;
+            }
+        }
+    }
+
+    // Windows fallback: check common locations for .cmd/.exe variants
+    #[cfg(windows)]
+    {
+        let candidates = [
+            format!("C:\\Program Files\\nodejs\\{command}.cmd"),
+            format!("C:\\Program Files\\nodejs\\{command}.exe"),
+            format!("C:\\Program Files\\nodejs\\{command}"),
+        ];
+        for candidate in &candidates {
+            if std::path::Path::new(candidate).exists() {
+                return candidate.clone();
+            }
+        }
+    }
+
+    // Return original and let the OS try
+    command.to_string()
+}
+
 fn spawn_stdio_inner(spec: &McpStdioSpawnSpec, server_name: &str) -> Result<McpStdioInner, String> {
-    let mut cmd = Command::new(&spec.command);
+    let resolved_command = resolve_command(&spec.command);
+    let mut cmd = Command::new(&resolved_command);
     cmd.args(&spec.args);
     cmd.envs(&spec.env);
     cmd.stdin(std::process::Stdio::piped());

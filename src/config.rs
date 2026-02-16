@@ -160,18 +160,12 @@ pub struct Config {
     pub timezone: String,
     #[serde(default = "default_control_chat_ids")]
     pub control_chat_ids: Vec<i64>,
-    #[serde(default = "default_max_session_messages")]
-    pub max_session_messages: usize,
-    #[serde(default = "default_compact_keep_recent")]
-    pub compact_keep_recent: usize,
     #[serde(default)]
     pub discord_bot_token: Option<String>,
     #[serde(default)]
     pub discord_allowed_channels: Vec<u64>,
     #[serde(default)]
     pub discord_no_mention: bool,
-    #[serde(default)]
-    pub show_thinking: bool,
 
     // --- Web UI ---
     #[serde(default = "default_web_enabled")]
@@ -237,10 +231,6 @@ pub struct Config {
     pub bot_username: String,
     #[serde(default)]
     pub allowed_groups: Vec<i64>,
-    #[serde(default)]
-    pub discord_bot_token: Option<String>,
-    #[serde(default)]
-    pub discord_allowed_channels: Vec<u64>,
 }
 
 impl Config {
