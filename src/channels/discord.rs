@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,6 +34,50 @@ pub struct DiscordChannelConfig {
 pub struct DiscordAdapter {
     token: String,
     http_client: reqwest::Client,
+}
+
+fn format_reqwest_error(prefix: &str, err: &reqwest::Error) -> String {
+    let mut details = Vec::new();
+    if err.is_timeout() {
+        details.push("timeout");
+    }
+    if err.is_connect() {
+        details.push("connect");
+    }
+    if err.is_request() {
+        details.push("request");
+    }
+    if err.is_body() {
+        details.push("body");
+    }
+    if err.is_decode() {
+        details.push("decode");
+    }
+    if err.is_status() {
+        details.push("status");
+    }
+
+    let mut source_chain = Vec::new();
+    let mut source = err.source();
+    while let Some(s) = source {
+        source_chain.push(s.to_string());
+        source = s.source();
+    }
+
+    let url = err.url().map(|u| u.as_str().to_string()).unwrap_or_default();
+    let class = if details.is_empty() {
+        "unknown".to_string()
+    } else {
+        details.join("|")
+    };
+    if source_chain.is_empty() {
+        format!("{prefix}: {err} [class={class}, url={url}]")
+    } else {
+        format!(
+            "{prefix}: {err} [class={class}, url={url}, source_chain={}]",
+            source_chain.join(" -> ")
+        )
+    }
 }
 
 impl DiscordAdapter {
@@ -74,7 +119,7 @@ impl ChannelAdapter for DiscordAdapter {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("Failed to send Discord message: {e}"))?;
+                .map_err(|e| format_reqwest_error("Failed to send Discord message", &e))?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -127,7 +172,7 @@ impl ChannelAdapter for DiscordAdapter {
             .multipart(form)
             .send()
             .await
-            .map_err(|e| format!("Failed to send Discord attachment: {e}"))?;
+            .map_err(|e| format_reqwest_error("Failed to send Discord attachment", &e))?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
