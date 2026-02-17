@@ -185,6 +185,65 @@ impl SyncSkillsTool {
 
         frontmatter.join("\n")
     }
+
+    /// Parse a skill reference that may contain a full GitHub URL or owner/repo/skill path.
+    /// Returns (source_repo, skill_name, git_ref_override).
+    fn parse_skill_reference(raw: &str) -> Option<(String, String, Option<String>)> {
+        let raw = raw.trim();
+
+        // Handle full GitHub URLs:
+        // https://github.com/owner/repo/tree/branch/skills/skill-name
+        // https://github.com/owner/repo/tree/branch/skill-name
+        if let Some(rest) = raw
+            .strip_prefix("https://github.com/")
+            .or_else(|| raw.strip_prefix("http://github.com/"))
+        {
+            let parts: Vec<&str> = rest.splitn(5, '/').collect();
+            if parts.len() >= 4 && parts[2] == "tree" {
+                let repo = format!("{}/{}", parts[0], parts[1]);
+                let branch = parts[3].to_string();
+                let skill_path = parts.get(4).unwrap_or(&"").to_string();
+                // Strip leading "skills/" prefix if present
+                let skill = skill_path
+                    .strip_prefix("skills/")
+                    .unwrap_or(&skill_path)
+                    .trim_end_matches('/')
+                    .to_string();
+                if !skill.is_empty() {
+                    return Some((repo, skill, Some(branch)));
+                }
+            }
+        }
+
+        // Handle raw.githubusercontent.com URLs
+        if let Some(rest) = raw.strip_prefix("https://raw.githubusercontent.com/") {
+            let parts: Vec<&str> = rest.splitn(4, '/').collect();
+            if parts.len() >= 4 {
+                let repo = format!("{}/{}", parts[0], parts[1]);
+                let branch = parts[2].to_string();
+                let skill_path = parts[3]
+                    .strip_prefix("skills/")
+                    .unwrap_or(parts[3])
+                    .trim_end_matches("/SKILL.md")
+                    .trim_end_matches(".md")
+                    .to_string();
+                if !skill_path.is_empty() {
+                    return Some((repo, skill_path, Some(branch)));
+                }
+            }
+        }
+
+        // Handle owner/repo/skill patterns (3+ segments with no source_repo override):
+        // "omer-metin/skills-for-antigravity/viral-hooks" -> repo=omer-metin/skills-for-antigravity, skill=viral-hooks
+        let segments: Vec<&str> = raw.split('/').collect();
+        if segments.len() >= 3 {
+            let repo = format!("{}/{}", segments[0], segments[1]);
+            let skill = segments[2..].join("/");
+            return Some((repo, skill, None));
+        }
+
+        None
+    }
 }
 
 #[async_trait]
@@ -196,20 +255,20 @@ impl Tool for SyncSkillsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "sync_skills".into(),
-            description: "Sync a skill from an external repository (default: vercel-labs/skills) into local microclaw.data/skills and normalize frontmatter (source/version/updated_at/platforms/deps).".into(),
+            description: "Sync a skill from a GitHub repository into local microclaw.data/skills. Accepts: skill name, owner/repo/skill path, or full GitHub URL. Auto-detects the source repo from the path — no need to set source_repo separately for most skills.".into(),
             input_schema: schema_object(
                 json!({
                     "skill_name": {
                         "type": "string",
-                        "description": "Upstream skill name/path to sync"
+                        "description": "Skill name, owner/repo/skill path, or full GitHub URL"
                     },
                     "target_name": {
                         "type": "string",
-                        "description": "Optional local skill directory/name (defaults to skill_name)"
+                        "description": "Optional local skill directory/name (defaults to last segment of skill_name)"
                     },
                     "source_repo": {
                         "type": "string",
-                        "description": "GitHub repo in owner/name format (default: vercel-labs/skills)"
+                        "description": "GitHub repo in owner/name format (auto-detected from skill_name if not provided)"
                     },
                     "git_ref": {
                         "type": "string",
@@ -222,41 +281,70 @@ impl Tool for SyncSkillsTool {
     }
 
     async fn execute(&self, input: serde_json::Value) -> ToolResult {
-        let skill_name = match input.get("skill_name").and_then(|v| v.as_str()) {
+        let raw_skill_name = match input.get("skill_name").and_then(|v| v.as_str()) {
             Some(v) if !v.trim().is_empty() => v.trim(),
             _ => return ToolResult::error("Missing required parameter: skill_name".into()),
         };
 
-        let source_repo = input
+        let explicit_repo = input
             .get("source_repo")
             .and_then(|v| v.as_str())
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or("vercel-labs/skills")
-            .trim();
+            .filter(|v| !v.trim().is_empty());
 
-        let git_ref = input
+        let explicit_ref = input
             .get("git_ref")
             .and_then(|v| v.as_str())
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or("main")
-            .trim();
+            .filter(|v| !v.trim().is_empty());
+
+        // Auto-detect repo from skill_name if no explicit source_repo was given
+        let (source_repo, skill_name, git_ref) =
+            if explicit_repo.is_none() {
+                if let Some((repo, skill, ref_override)) =
+                    Self::parse_skill_reference(raw_skill_name)
+                {
+                    let git_ref = explicit_ref
+                        .map(|s| s.to_string())
+                        .or(ref_override)
+                        .unwrap_or_else(|| "main".to_string());
+                    (repo, skill, git_ref)
+                } else {
+                    (
+                        "vercel-labs/skills".to_string(),
+                        raw_skill_name.to_string(),
+                        explicit_ref.unwrap_or("main").to_string(),
+                    )
+                }
+            } else {
+                (
+                    explicit_repo.unwrap().trim().to_string(),
+                    raw_skill_name.to_string(),
+                    explicit_ref.unwrap_or("main").to_string(),
+                )
+            };
 
         let target_name = input
             .get("target_name")
             .and_then(|v| v.as_str())
             .filter(|v| !v.trim().is_empty())
-            .unwrap_or(skill_name)
-            .trim();
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| {
+                // Use just the last segment as the target name
+                skill_name
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&skill_name)
+                    .to_string()
+            });
 
-        let raw = match Self::fetch_skill_content(source_repo, skill_name, git_ref).await {
+        let raw = match Self::fetch_skill_content(&source_repo, &skill_name, &git_ref).await {
             Ok(v) => v,
             Err(e) => return ToolResult::error(e).with_error_type("sync_fetch_failed"),
         };
 
         let normalized =
-            Self::normalize_skill_markdown(&raw, source_repo, git_ref, skill_name, target_name);
+            Self::normalize_skill_markdown(&raw, &source_repo, &git_ref, &skill_name, &target_name);
 
-        let out_dir = self.skills_dir.join(target_name);
+        let out_dir = self.skills_dir.join(&target_name);
         if let Err(e) = std::fs::create_dir_all(&out_dir) {
             return ToolResult::error(format!("Failed to create skill directory: {e}"))
                 .with_error_type("sync_write_failed");
@@ -299,6 +387,35 @@ mod tests {
         let result = tool.execute(json!({})).await;
         assert!(result.is_error);
         assert!(result.content.contains("skill_name"));
+    }
+
+    #[test]
+    fn test_parse_skill_reference_github_url() {
+        let result = SyncSkillsTool::parse_skill_reference(
+            "https://github.com/omer-metin/skills-for-antigravity/tree/main/skills/viral-hooks",
+        );
+        let (repo, skill, git_ref) = result.unwrap();
+        assert_eq!(repo, "omer-metin/skills-for-antigravity");
+        assert_eq!(skill, "viral-hooks");
+        assert_eq!(git_ref.unwrap(), "main");
+    }
+
+    #[test]
+    fn test_parse_skill_reference_owner_repo_skill() {
+        let result = SyncSkillsTool::parse_skill_reference(
+            "omer-metin/skills-for-antigravity/viral-hooks",
+        );
+        let (repo, skill, git_ref) = result.unwrap();
+        assert_eq!(repo, "omer-metin/skills-for-antigravity");
+        assert_eq!(skill, "viral-hooks");
+        assert!(git_ref.is_none());
+    }
+
+    #[test]
+    fn test_parse_skill_reference_simple_name() {
+        // Two segments or less should return None (use default repo)
+        assert!(SyncSkillsTool::parse_skill_reference("viral-hooks").is_none());
+        assert!(SyncSkillsTool::parse_skill_reference("find-skills").is_none());
     }
 
     #[test]
