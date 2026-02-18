@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod memory;
 pub mod memory_quality;
 pub mod runtime;
+pub mod sandbox;
 pub mod scheduler;
 pub mod setup;
 pub mod skills;
