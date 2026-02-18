@@ -17,6 +17,34 @@ require_cmd() {
   fi
 }
 
+current_branch() {
+  local branch
+  branch="$(git symbolic-ref --quiet --short HEAD || true)"
+  if [ -z "$branch" ]; then
+    echo "Detached HEAD is not supported for release push" >&2
+    exit 1
+  fi
+  echo "$branch"
+}
+
+sync_rebase_and_push() {
+  local remote="${1:-origin}"
+  local branch
+  branch="$(current_branch)"
+
+  echo "Syncing $remote/$branch before push..."
+  git fetch "$remote" "$branch"
+  if git show-ref --verify --quiet "refs/remotes/$remote/$branch"; then
+    git rebase "$remote/$branch"
+  fi
+
+  if git rev-parse --abbrev-ref --symbolic-full-name "@{u}" >/dev/null 2>&1; then
+    git push "$remote" "$branch"
+  else
+    git push -u "$remote" "$branch"
+  fi
+}
+
 wait_for_ci_success() {
   local github_repo="$1"
   local commit_sha="$2"
@@ -173,7 +201,7 @@ RUBY
 
 git add .
 git commit -m "microclaw homebrew release $NEW_VERSION"
-git push
+sync_rebase_and_push origin
 
 echo ""
 echo "Done! Released $TAG and updated Homebrew tap."

@@ -28,6 +28,34 @@ require_cmd() {
   fi
 }
 
+current_branch() {
+  local branch
+  branch="$(git symbolic-ref --quiet --short HEAD || true)"
+  if [ -z "$branch" ]; then
+    echo "Detached HEAD is not supported for release push" >&2
+    exit 1
+  fi
+  echo "$branch"
+}
+
+sync_rebase_and_push() {
+  local remote="${1:-origin}"
+  local branch
+  branch="$(current_branch)"
+
+  echo "Syncing $remote/$branch before push..."
+  git fetch "$remote" "$branch"
+  if git show-ref --verify --quiet "refs/remotes/$remote/$branch"; then
+    git rebase "$remote/$branch"
+  fi
+
+  if git rev-parse --abbrev-ref --symbolic-full-name "@{u}" >/dev/null 2>&1; then
+    git push "$remote" "$branch"
+  else
+    git push -u "$remote" "$branch"
+  fi
+}
+
 detect_arch() {
   case "$(uname -m)" in
     x86_64|amd64) echo "x86_64" ;;
@@ -185,7 +213,7 @@ echo "SHA256: $SHA256"
 # --- Git commit + push ---
 git add .
 git commit -m "bump version to $NEW_VERSION"
-git push
+sync_rebase_and_push origin
 
 echo "Release commit pushed: $(git rev-parse HEAD)"
 
