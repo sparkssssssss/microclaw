@@ -15,8 +15,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 REPO_DIR="$ROOT_DIR"
-TAP_DIR_DEFAULT="$ROOT_DIR/../../github/homebrew-tap"
-TAP_DIR="${TAP_DIR:-$TAP_DIR_DEFAULT}"
+TAP_DIR="$ROOT_DIR/tmp/homebrew-tap"
 TAP_REPO="microclaw/homebrew-tap"
 FORMULA_PATH="Formula/microclaw.rb"
 GITHUB_REPO="microclaw/microclaw"
@@ -190,6 +189,9 @@ else
 fi
 
 # --- Build release binary ---
+echo "Cleaning previous Rust build artifacts..."
+cargo clean
+
 echo "Building release binary..."
 cargo build --release
 

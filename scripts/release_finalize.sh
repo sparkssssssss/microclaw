@@ -173,10 +173,11 @@ else
     -n "MicroClaw $TAG"
 fi
 
-if [ ! -d "$TAP_DIR/.git" ]; then
-  echo "Cloning tap repo..."
-  git clone "https://github.com/$TAP_REPO.git" "$TAP_DIR"
-fi
+echo "Resetting tap workspace: $TAP_DIR"
+rm -rf "$TAP_DIR"
+mkdir -p "$(dirname "$TAP_DIR")"
+echo "Cloning tap repo..."
+git clone "https://github.com/$TAP_REPO.git" "$TAP_DIR"
 
 cd "$TAP_DIR"
 mkdir -p Formula
