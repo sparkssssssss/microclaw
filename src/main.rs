@@ -168,7 +168,7 @@ async fn reembed_memories() -> anyhow::Result<()> {
         }
 
         println!("Done! {} embedded, {} failed", success, failed);
-        return Ok(());
+        Ok(())
     }
 }
 

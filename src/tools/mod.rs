@@ -29,6 +29,7 @@ use crate::channel_adapter::ChannelRegistry;
 use crate::config::{Config, WorkingDirIsolation};
 use crate::db::Database;
 use crate::llm_types::ToolDefinition;
+use crate::sandbox::SandboxRouter;
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -271,12 +272,21 @@ impl ToolRegistry {
                 e
             );
         }
+        let sandbox_router = Arc::new(SandboxRouter::new(config.sandbox.clone(), &working_dir));
+        tracing::info!(
+            mode = ?sandbox_router.mode(),
+            backend = sandbox_router.backend_name(),
+            "Sandbox initialized"
+        );
         let skills_data_dir = config.skills_data_dir();
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(bash::BashTool::new_with_isolation(
-                &config.working_dir,
-                config.working_dir_isolation,
-            )),
+            Box::new(
+                bash::BashTool::new_with_isolation(
+                    &config.working_dir,
+                    config.working_dir_isolation,
+                )
+                .with_sandbox_router(sandbox_router.clone()),
+            ),
             Box::new(browser::BrowserTool::new(&config.data_dir)),
             Box::new(read_file::ReadFileTool::new_with_isolation(
                 &config.working_dir,
@@ -367,12 +377,16 @@ impl ToolRegistry {
                 e
             );
         }
+        let sandbox_router = Arc::new(SandboxRouter::new(config.sandbox.clone(), &working_dir));
         let skills_data_dir = config.skills_data_dir();
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(bash::BashTool::new_with_isolation(
-                &config.working_dir,
-                config.working_dir_isolation,
-            )),
+            Box::new(
+                bash::BashTool::new_with_isolation(
+                    &config.working_dir,
+                    config.working_dir_isolation,
+                )
+                .with_sandbox_router(sandbox_router.clone()),
+            ),
             Box::new(browser::BrowserTool::new(&config.data_dir)),
             Box::new(read_file::ReadFileTool::new_with_isolation(
                 &config.working_dir,

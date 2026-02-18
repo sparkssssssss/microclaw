@@ -51,6 +51,24 @@ fn default_working_dir() -> String {
 fn default_working_dir_isolation() -> WorkingDirIsolation {
     WorkingDirIsolation::Chat
 }
+fn default_sandbox_mode() -> SandboxMode {
+    SandboxMode::Off
+}
+fn default_sandbox_backend() -> SandboxBackend {
+    SandboxBackend::Auto
+}
+fn default_sandbox_image() -> String {
+    "ubuntu:25.10".into()
+}
+fn default_sandbox_container_prefix() -> String {
+    "microclaw-sandbox".into()
+}
+fn default_sandbox_no_network() -> bool {
+    true
+}
+fn default_sandbox_require_runtime() -> bool {
+    false
+}
 fn default_timezone() -> String {
     "UTC".into()
 }
@@ -112,6 +130,58 @@ pub enum WorkingDirIsolation {
     Chat,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxMode {
+    Off,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxBackend {
+    Auto,
+    Docker,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    #[serde(default = "default_sandbox_mode")]
+    pub mode: SandboxMode,
+    #[serde(default = "default_sandbox_backend")]
+    pub backend: SandboxBackend,
+    #[serde(default = "default_sandbox_image")]
+    pub image: String,
+    #[serde(default = "default_sandbox_container_prefix")]
+    pub container_prefix: String,
+    #[serde(default = "default_sandbox_no_network")]
+    pub no_network: bool,
+    #[serde(default = "default_sandbox_require_runtime")]
+    pub require_runtime: bool,
+    #[serde(default)]
+    pub memory_limit: Option<String>,
+    #[serde(default)]
+    pub cpu_quota: Option<f64>,
+    #[serde(default)]
+    pub pids_limit: Option<u32>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_sandbox_mode(),
+            backend: default_sandbox_backend(),
+            image: default_sandbox_image(),
+            container_prefix: default_sandbox_container_prefix(),
+            no_network: default_sandbox_no_network(),
+            require_runtime: default_sandbox_require_runtime(),
+            memory_limit: None,
+            cpu_quota: None,
+            pids_limit: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelPrice {
     pub model: String,
@@ -156,6 +226,8 @@ pub struct Config {
     pub working_dir: String,
     #[serde(default = "default_working_dir_isolation")]
     pub working_dir_isolation: WorkingDirIsolation,
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
     #[serde(default = "default_timezone")]
     pub timezone: String,
     #[serde(default = "default_control_chat_ids")]
@@ -359,6 +431,14 @@ impl Config {
         }
         if self.working_dir.trim().is_empty() {
             self.working_dir = default_working_dir();
+        }
+        self.sandbox.image = self.sandbox.image.trim().to_string();
+        if self.sandbox.image.is_empty() {
+            self.sandbox.image = default_sandbox_image();
+        }
+        self.sandbox.container_prefix = self.sandbox.container_prefix.trim().to_string();
+        if self.sandbox.container_prefix.is_empty() {
+            self.sandbox.container_prefix = default_sandbox_container_prefix();
         }
         if self.web_host.trim().is_empty() {
             self.web_host = default_web_host();
@@ -609,6 +689,7 @@ mod tests {
             data_dir: "./microclaw.data".into(),
             working_dir: "./tmp".into(),
             working_dir_isolation: WorkingDirIsolation::Chat,
+            sandbox: SandboxConfig::default(),
             openai_api_key: None,
             timezone: "UTC".into(),
             allowed_groups: vec![],
@@ -702,8 +783,18 @@ mod tests {
             config.working_dir_isolation,
             WorkingDirIsolation::Chat
         ));
+        assert!(matches!(config.sandbox.mode, SandboxMode::Off));
         assert_eq!(config.max_document_size_mb, 100);
         assert_eq!(config.timezone, "UTC");
+    }
+
+    #[test]
+    fn test_config_sandbox_defaults_to_off() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(config.sandbox.mode, SandboxMode::Off));
+        assert!(matches!(config.sandbox.backend, SandboxBackend::Auto));
+        assert_eq!(config.sandbox.image, "ubuntu:25.10");
     }
 
     #[test]
