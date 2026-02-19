@@ -45,7 +45,7 @@ fn default_memory_token_budget() -> usize {
     1500
 }
 fn default_data_dir() -> String {
-    "./microclaw.data".into()
+    default_microclaw_home_dir().to_string_lossy().to_string()
 }
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -808,7 +808,7 @@ mod tests {
         assert_eq!(config.llm_provider, "anthropic");
         assert_eq!(config.max_tokens, 8192);
         assert_eq!(config.max_tool_iterations, 100);
-        assert_eq!(config.data_dir, "./microclaw.data");
+        assert!(config.data_dir.ends_with(".microclaw"));
         assert_eq!(config.working_dir, "./tmp");
         assert_eq!(config.memory_token_budget, 1500);
         assert!(matches!(
@@ -818,6 +818,13 @@ mod tests {
         assert!(matches!(config.sandbox.mode, SandboxMode::Off));
         assert_eq!(config.max_document_size_mb, 100);
         assert_eq!(config.timezone, "UTC");
+    }
+
+    #[test]
+    fn test_default_data_dir_uses_microclaw_home() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.data_dir.ends_with(".microclaw"));
     }
 
     #[test]
