@@ -2033,17 +2033,24 @@ mod tests {
     async fn test_hook_before_llm_block_returns_reason() {
         let base_dir = std::env::temp_dir().join(format!("mc_hook_block_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(base_dir.join("hooks/block-all")).unwrap();
+        let command = if cfg!(windows) {
+            r#"echo {"action":"block","reason":"blocked by test hook"}"#
+        } else {
+            r#"echo '{"action":"block","reason":"blocked by test hook"}'"#
+        };
         std::fs::write(
             base_dir.join("hooks/block-all/HOOK.md"),
-            r#"---
+            format!(
+                r#"---
 name: block-all
 description: block all llm calls
 events: [BeforeLLMCall]
-command: "echo '{\"action\":\"block\",\"reason\":\"blocked by test hook\"}'"
+command: "{command}"
 enabled: true
 timeout_ms: 1000
 ---
-"#,
+"#
+            ),
         )
         .unwrap();
 
