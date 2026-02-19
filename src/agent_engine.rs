@@ -2032,14 +2032,25 @@ mod tests {
     #[tokio::test]
     async fn test_hook_before_llm_block_returns_reason() {
         let base_dir = std::env::temp_dir().join(format!("mc_hook_block_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(base_dir.join("hooks/block-all")).unwrap();
+        let hook_dir = base_dir.join("hooks/block-all");
+        std::fs::create_dir_all(&hook_dir).unwrap();
         let command = if cfg!(windows) {
-            r#"echo {"action":"block","reason":"blocked by test hook"}"#
+            std::fs::write(
+                hook_dir.join("hook.cmd"),
+                "@echo off\r\necho {\"action\":\"block\",\"reason\":\"blocked by test hook\"}\r\n",
+            )
+            .unwrap();
+            "hook.cmd"
         } else {
-            r#"echo '{"action":"block","reason":"blocked by test hook"}'"#
+            std::fs::write(
+                hook_dir.join("hook.sh"),
+                "#!/bin/sh\necho '{\"action\":\"block\",\"reason\":\"blocked by test hook\"}'\n",
+            )
+            .unwrap();
+            "sh hook.sh"
         };
         std::fs::write(
-            base_dir.join("hooks/block-all/HOOK.md"),
+            hook_dir.join("HOOK.md"),
             format!(
                 r#"---
 name: block-all
