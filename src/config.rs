@@ -45,19 +45,23 @@ fn default_memory_token_budget() -> usize {
     1500
 }
 fn default_data_dir() -> String {
-    home_dir()
-        .map(|h| h.join(".microclaw"))
-        .unwrap_or_else(|| PathBuf::from(".microclaw"))
-        .to_string_lossy()
-        .to_string()
+    default_data_root().to_string_lossy().to_string()
 }
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }
+fn default_data_root() -> PathBuf {
+    home_dir()
+        .map(|h| h.join(".microclaw"))
+        .unwrap_or_else(|| PathBuf::from(".microclaw"))
+}
 fn default_working_dir() -> String {
-    "./tmp".into()
+    default_data_root()
+        .join("working_dir")
+        .to_string_lossy()
+        .to_string()
 }
 fn default_working_dir_isolation() -> WorkingDirIsolation {
     WorkingDirIsolation::Chat
@@ -300,9 +304,9 @@ impl Config {
             max_history_messages: 50,
             max_document_size_mb: 100,
             memory_token_budget: 1500,
-            data_dir: "./microclaw.data".into(),
+            data_dir: default_data_dir(),
             skills_dir: None,
-            working_dir: "./tmp".into(),
+            working_dir: default_working_dir(),
             working_dir_isolation: WorkingDirIsolation::Chat,
             sandbox: SandboxConfig::default(),
             openai_api_key: None,
@@ -755,8 +759,8 @@ mod tests {
         config.allowed_groups = vec![123, 456];
         config.control_chat_ids = vec![999];
         assert_eq!(config.model, "claude-sonnet-4-5-20250929");
-        assert_eq!(config.data_dir, "./microclaw.data");
-        assert_eq!(config.working_dir, "./tmp");
+        assert!(config.data_dir.ends_with(".microclaw"));
+        assert!(config.working_dir.ends_with(".microclaw/working_dir"));
         assert_eq!(config.openai_api_key.as_deref(), Some("sk-test"));
         assert_eq!(config.timezone, "US/Eastern");
         assert_eq!(config.allowed_groups, vec![123, 456]);
@@ -781,7 +785,7 @@ mod tests {
         assert_eq!(config.max_tokens, 8192);
         assert_eq!(config.max_tool_iterations, 100);
         assert!(config.data_dir.ends_with(".microclaw"));
-        assert_eq!(config.working_dir, "./tmp");
+        assert!(config.working_dir.ends_with(".microclaw/working_dir"));
         assert_eq!(config.memory_token_budget, 1500);
         assert!(matches!(
             config.working_dir_isolation,
@@ -813,7 +817,7 @@ mod tests {
         let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nworking_dir: '  '\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
-        assert_eq!(config.working_dir, "./tmp");
+        assert!(config.working_dir.ends_with(".microclaw/working_dir"));
     }
 
     #[test]
