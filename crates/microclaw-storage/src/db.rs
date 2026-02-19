@@ -316,6 +316,26 @@ fn ensure_chat_identity_schema(conn: &Connection) -> Result<(), MicroClawError> 
     Ok(())
 }
 
+fn ensure_sessions_schema(conn: &Connection) -> Result<(), MicroClawError> {
+    if !table_has_column(conn, "sessions", "parent_session_key")? {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN parent_session_key TEXT",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "sessions", "fork_point")? {
+        conn.execute("ALTER TABLE sessions ADD COLUMN fork_point INTEGER", [])?;
+    }
+    if table_has_column(conn, "sessions", "parent_session_key")? {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_parent_session_key
+             ON sessions(parent_session_key)",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn get_schema_version(conn: &Connection) -> Result<i64, MicroClawError> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS db_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -462,20 +482,7 @@ fn apply_schema_migrations(conn: &Connection) -> Result<(), MicroClawError> {
         version = 5;
     }
     if version < 6 {
-        if !table_has_column(conn, "sessions", "parent_session_key")? {
-            conn.execute(
-                "ALTER TABLE sessions ADD COLUMN parent_session_key TEXT",
-                [],
-            )?;
-        }
-        if !table_has_column(conn, "sessions", "fork_point")? {
-            conn.execute("ALTER TABLE sessions ADD COLUMN fork_point INTEGER", [])?;
-        }
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_parent_session_key
-             ON sessions(parent_session_key)",
-            [],
-        )?;
+        ensure_sessions_schema(conn)?;
         set_schema_version(conn, 6)?;
         version = 6;
     }
@@ -610,8 +617,6 @@ impl Database {
                 parent_session_key TEXT,
                 fork_point INTEGER
             );
-            CREATE INDEX IF NOT EXISTS idx_sessions_parent_session_key
-                ON sessions(parent_session_key);
 
             CREATE TABLE IF NOT EXISTS llm_usage_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -749,6 +754,7 @@ impl Database {
 
         ensure_chat_identity_schema(&conn)?;
         ensure_memory_schema(&conn)?;
+        ensure_sessions_schema(&conn)?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memories_active_updated ON memories(is_archived, updated_at)",
             [],
@@ -3061,6 +3067,17 @@ mod tests {
         let has_last_seen = table_has_column(&conn, "memories", "last_seen_at").unwrap();
         let has_archived = table_has_column(&conn, "memories", "is_archived").unwrap();
         assert!(has_confidence && has_source && has_last_seen && has_archived);
+        assert!(table_has_column(&conn, "sessions", "parent_session_key").unwrap());
+        assert!(table_has_column(&conn, "sessions", "fork_point").unwrap());
+
+        let session_parent_index_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_sessions_parent_session_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_parent_index_exists, 1);
 
         let supersede_table_exists: i64 = conn
             .query_row(
