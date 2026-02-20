@@ -8,7 +8,9 @@ use tracing::warn;
 use crate::channels::discord::{build_discord_runtime_contexts, DiscordRuntimeContext};
 use crate::channels::feishu::{build_feishu_runtime_contexts, FeishuRuntimeContext};
 use crate::channels::slack::{build_slack_runtime_contexts, SlackRuntimeContext};
-use crate::channels::telegram::{TelegramChannelConfig, TelegramRuntimeContext};
+use crate::channels::telegram::{
+    build_telegram_runtime_contexts, TelegramChannelConfig, TelegramRuntimeContext,
+};
 use crate::channels::{DiscordAdapter, FeishuAdapter, SlackAdapter, TelegramAdapter};
 use crate::config::Config;
 use crate::embedding::EmbeddingProvider;
@@ -65,83 +67,14 @@ pub async fn run(
 
     if config.channel_enabled("telegram") {
         if let Some(tg_cfg) = config.channel_config::<TelegramChannelConfig>("telegram") {
-            let mut account_ids: Vec<String> = tg_cfg.accounts.keys().cloned().collect();
-            account_ids.sort();
-            let default_account = tg_cfg
-                .default_account
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(ToOwned::to_owned)
-                .or_else(|| {
-                    if tg_cfg.accounts.contains_key("default") {
-                        Some("default".to_string())
-                    } else {
-                        account_ids.first().cloned()
-                    }
-                });
-
-            for account_id in account_ids {
-                let Some(account_cfg) = tg_cfg.accounts.get(&account_id) else {
-                    continue;
-                };
-                if !account_cfg.enabled || account_cfg.bot_token.trim().is_empty() {
-                    continue;
-                }
-                let is_default = default_account
-                    .as_deref()
-                    .map(|v| v == account_id.as_str())
-                    .unwrap_or(false);
-                let channel_name = if is_default {
-                    "telegram".to_string()
-                } else {
-                    format!("telegram.{account_id}")
-                };
-                let bot = teloxide::Bot::new(&account_cfg.bot_token);
+            for (token, runtime_ctx) in build_telegram_runtime_contexts(&config) {
+                let bot = teloxide::Bot::new(&token);
                 registry.register(Arc::new(TelegramAdapter::new(
-                    channel_name.clone(),
+                    runtime_ctx.channel_name.clone(),
                     bot.clone(),
                     tg_cfg.clone(),
                 )));
-                let bot_username = if account_cfg.bot_username.trim().is_empty() {
-                    config.bot_username_for_channel(&channel_name)
-                } else {
-                    account_cfg.bot_username.trim().to_string()
-                };
-                let allowed_groups = if account_cfg.allowed_groups.is_empty() {
-                    tg_cfg.allowed_groups.clone()
-                } else {
-                    account_cfg.allowed_groups.clone()
-                };
-                telegram_runtimes.push((
-                    bot,
-                    TelegramRuntimeContext {
-                        channel_name,
-                        bot_username,
-                        allowed_groups,
-                    },
-                ));
-            }
-
-            if telegram_runtimes.is_empty() && !tg_cfg.bot_token.trim().is_empty() {
-                let bot = teloxide::Bot::new(&tg_cfg.bot_token);
-                registry.register(Arc::new(TelegramAdapter::new(
-                    "telegram".to_string(),
-                    bot.clone(),
-                    tg_cfg.clone(),
-                )));
-                telegram_runtimes.push((
-                    bot,
-                    TelegramRuntimeContext {
-                        channel_name: "telegram".to_string(),
-                        bot_username: if tg_cfg.bot_username.trim().is_empty() {
-                            config.bot_username_for_channel("telegram")
-                        } else {
-                            tg_cfg.bot_username.trim().to_string()
-                        },
-                        allowed_groups: tg_cfg.allowed_groups.clone(),
-                    },
-                ));
+                telegram_runtimes.push((bot, runtime_ctx));
             }
         }
     }

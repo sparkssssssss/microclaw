@@ -194,6 +194,84 @@ pub struct TelegramRuntimeContext {
     pub allowed_groups: Vec<i64>,
 }
 
+pub fn build_telegram_runtime_contexts(
+    config: &crate::config::Config,
+) -> Vec<(String, TelegramRuntimeContext)> {
+    let Some(tg_cfg) = config.channel_config::<TelegramChannelConfig>("telegram") else {
+        return Vec::new();
+    };
+
+    let mut account_ids: Vec<String> = tg_cfg.accounts.keys().cloned().collect();
+    account_ids.sort();
+    let default_account = tg_cfg
+        .default_account
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            if tg_cfg.accounts.contains_key("default") {
+                Some("default".to_string())
+            } else {
+                account_ids.first().cloned()
+            }
+        });
+
+    let mut runtimes = Vec::new();
+    for account_id in account_ids {
+        let Some(account_cfg) = tg_cfg.accounts.get(&account_id) else {
+            continue;
+        };
+        if !account_cfg.enabled || account_cfg.bot_token.trim().is_empty() {
+            continue;
+        }
+        let is_default = default_account
+            .as_deref()
+            .map(|v| v == account_id.as_str())
+            .unwrap_or(false);
+        let channel_name = if is_default {
+            "telegram".to_string()
+        } else {
+            format!("telegram.{account_id}")
+        };
+        let bot_username = if account_cfg.bot_username.trim().is_empty() {
+            config.bot_username_for_channel(&channel_name)
+        } else {
+            account_cfg.bot_username.trim().to_string()
+        };
+        let allowed_groups = if account_cfg.allowed_groups.is_empty() {
+            tg_cfg.allowed_groups.clone()
+        } else {
+            account_cfg.allowed_groups.clone()
+        };
+        runtimes.push((
+            account_cfg.bot_token.clone(),
+            TelegramRuntimeContext {
+                channel_name,
+                bot_username,
+                allowed_groups,
+            },
+        ));
+    }
+
+    if runtimes.is_empty() && !tg_cfg.bot_token.trim().is_empty() {
+        runtimes.push((
+            tg_cfg.bot_token.clone(),
+            TelegramRuntimeContext {
+                channel_name: "telegram".to_string(),
+                bot_username: if tg_cfg.bot_username.trim().is_empty() {
+                    config.bot_username_for_channel("telegram")
+                } else {
+                    tg_cfg.bot_username.trim().to_string()
+                },
+                allowed_groups: tg_cfg.allowed_groups.clone(),
+            },
+        ));
+    }
+
+    runtimes
+}
+
 pub async fn start_telegram_bot(
     state: Arc<AppState>,
     bot: Bot,
@@ -1707,5 +1785,64 @@ mod tests {
     #[test]
     fn test_guess_image_media_type_empty() {
         assert_eq!(guess_image_media_type(&[]), "image/jpeg");
+    }
+
+    #[test]
+    fn test_build_telegram_runtime_contexts_multi_account() {
+        let mut cfg = crate::config::Config::test_defaults();
+        cfg.bot_username = "global_bot".to_string();
+        cfg.channels = serde_yaml::from_str(
+            r#"
+telegram:
+  enabled: true
+  default_account: "sales"
+  accounts:
+    sales:
+      enabled: true
+      bot_token: "tg_sales"
+      bot_username: "sales_bot"
+      allowed_groups: [101]
+    ops:
+      enabled: true
+      bot_token: "tg_ops"
+      allowed_groups: [202]
+"#,
+        )
+        .unwrap();
+
+        let runtimes = build_telegram_runtime_contexts(&cfg);
+        assert_eq!(runtimes.len(), 2);
+        assert_eq!(runtimes[0].0, "tg_ops");
+        assert_eq!(runtimes[0].1.channel_name, "telegram.ops");
+        assert_eq!(runtimes[0].1.bot_username, "global_bot");
+        assert_eq!(runtimes[0].1.allowed_groups, vec![202]);
+
+        assert_eq!(runtimes[1].0, "tg_sales");
+        assert_eq!(runtimes[1].1.channel_name, "telegram");
+        assert_eq!(runtimes[1].1.bot_username, "sales_bot");
+        assert_eq!(runtimes[1].1.allowed_groups, vec![101]);
+    }
+
+    #[test]
+    fn test_build_telegram_runtime_contexts_legacy_fallback() {
+        let mut cfg = crate::config::Config::test_defaults();
+        cfg.bot_username = "global_bot".to_string();
+        cfg.channels = serde_yaml::from_str(
+            r#"
+telegram:
+  enabled: true
+  bot_token: "legacy_tg"
+  bot_username: "legacy_bot"
+  allowed_groups: [7,8]
+"#,
+        )
+        .unwrap();
+
+        let runtimes = build_telegram_runtime_contexts(&cfg);
+        assert_eq!(runtimes.len(), 1);
+        assert_eq!(runtimes[0].0, "legacy_tg");
+        assert_eq!(runtimes[0].1.channel_name, "telegram");
+        assert_eq!(runtimes[0].1.bot_username, "legacy_bot");
+        assert_eq!(runtimes[0].1.allowed_groups, vec![7, 8]);
     }
 }

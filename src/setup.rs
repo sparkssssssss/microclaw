@@ -129,8 +129,28 @@ fn dynamic_field_key(channel: &str, yaml_key: &str) -> String {
     format!("DYN_{}_{}", channel.to_uppercase(), yaml_key.to_uppercase())
 }
 
+fn dynamic_account_id_field_key(channel: &str) -> String {
+    format!("DYN_{}_ACCOUNT_ID", channel.to_uppercase())
+}
+
 fn default_account_id() -> &'static str {
     "main"
+}
+
+fn account_id_from_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        default_account_id().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn is_valid_account_id(account_id: &str) -> bool {
+    !account_id.is_empty()
+        && account_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn resolve_channel_default_account_id(channel_cfg: &serde_yaml::Value) -> Option<String> {
@@ -486,11 +506,31 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
+                    key: "TELEGRAM_ACCOUNT_ID".into(),
+                    label: "Telegram default account id".into(),
+                    value: existing
+                        .get("TELEGRAM_ACCOUNT_ID")
+                        .cloned()
+                        .unwrap_or_else(|| default_account_id().to_string()),
+                    required: false,
+                    secret: false,
+                },
+                Field {
                     key: "DISCORD_BOT_TOKEN".into(),
                     label: "Discord bot token".into(),
                     value: existing.get("DISCORD_BOT_TOKEN").cloned().unwrap_or_default(),
                     required: false,
                     secret: true,
+                },
+                Field {
+                    key: "DISCORD_ACCOUNT_ID".into(),
+                    label: "Discord default account id".into(),
+                    value: existing
+                        .get("DISCORD_ACCOUNT_ID")
+                        .cloned()
+                        .unwrap_or_else(|| default_account_id().to_string()),
+                    required: false,
+                    secret: false,
                 },
                 Field {
                     key: "LLM_PROVIDER".into(),
@@ -642,6 +682,18 @@ impl SetupApp {
 
         // Generate fields for dynamic channels (slack, feishu, etc.)
         for ch in DYNAMIC_CHANNELS {
+            let account_key = dynamic_account_id_field_key(ch.name);
+            let account_value = existing
+                .get(&account_key)
+                .cloned()
+                .unwrap_or_else(|| default_account_id().to_string());
+            app.fields.push(Field {
+                key: account_key,
+                label: format!("{} default account id", ch.name),
+                value: account_value,
+                required: false,
+                secret: false,
+            });
             for f in ch.fields {
                 let key = dynamic_field_key(ch.name, f.yaml_key);
                 let value = existing
@@ -700,6 +752,11 @@ impl SetupApp {
                     } else {
                         String::new()
                     };
+                    let telegram_account_id = config
+                        .channels
+                        .get("telegram")
+                        .and_then(resolve_channel_default_account_id)
+                        .unwrap_or_else(|| default_account_id().to_string());
                     let bot_username = if !config.bot_username.trim().is_empty() {
                         config.bot_username
                     } else if let Some(ch_cfg) = config.channels.get("telegram") {
@@ -734,12 +791,23 @@ impl SetupApp {
                     } else {
                         String::new()
                     };
+                    let discord_account_id = config
+                        .channels
+                        .get("discord")
+                        .and_then(resolve_channel_default_account_id)
+                        .unwrap_or_else(|| default_account_id().to_string());
                     map.insert("TELEGRAM_BOT_TOKEN".into(), telegram_bot_token);
+                    map.insert("TELEGRAM_ACCOUNT_ID".into(), telegram_account_id);
                     map.insert("BOT_USERNAME".into(), bot_username);
                     map.insert("DISCORD_BOT_TOKEN".into(), discord_bot_token);
+                    map.insert("DISCORD_ACCOUNT_ID".into(), discord_account_id);
                     // Extract dynamic channel configs
                     for ch in DYNAMIC_CHANNELS {
                         if let Some(ch_map) = config.channels.get(ch.name) {
+                            let account_key = dynamic_account_id_field_key(ch.name);
+                            let account_id = resolve_channel_default_account_id(ch_map)
+                                .unwrap_or_else(|| default_account_id().to_string());
+                            map.insert(account_key, account_id);
                             for f in ch.fields {
                                 let value = channel_default_account_str_value(ch_map, f.yaml_key)
                                     .or_else(|| {
@@ -892,6 +960,9 @@ impl SetupApp {
 
     fn dynamic_field_channel(key: &str) -> Option<&'static str> {
         for ch in DYNAMIC_CHANNELS {
+            if key == dynamic_account_id_field_key(ch.name) {
+                return Some(ch.name);
+            }
             for f in ch.fields {
                 if key == dynamic_field_key(ch.name, f.yaml_key) {
                     return Some(ch.name);
@@ -903,8 +974,10 @@ impl SetupApp {
 
     fn is_field_visible(&self, key: &str) -> bool {
         match key {
-            "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" => self.channel_enabled("telegram"),
-            "DISCORD_BOT_TOKEN" => self.channel_enabled("discord"),
+            "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" | "TELEGRAM_ACCOUNT_ID" => {
+                self.channel_enabled("telegram")
+            }
+            "DISCORD_BOT_TOKEN" | "DISCORD_ACCOUNT_ID" => self.channel_enabled("discord"),
             _ => Self::dynamic_field_channel(key)
                 .map(|ch| self.channel_enabled(ch))
                 .unwrap_or(true),
@@ -974,6 +1047,12 @@ impl SetupApp {
         }
 
         if self.channel_enabled("telegram") {
+            let account_id = account_id_from_value(&self.field_value("TELEGRAM_ACCOUNT_ID"));
+            if !is_valid_account_id(&account_id) {
+                return Err(MicroClawError::Config(
+                    "TELEGRAM_ACCOUNT_ID must use only letters, numbers, '_' or '-'".into(),
+                ));
+            }
             if self.field_value("TELEGRAM_BOT_TOKEN").is_empty() {
                 return Err(MicroClawError::Config(
                     "TELEGRAM_BOT_TOKEN is required when telegram is enabled".into(),
@@ -992,8 +1071,25 @@ impl SetupApp {
             }
         }
 
+        if self.channel_enabled("discord") {
+            let account_id = account_id_from_value(&self.field_value("DISCORD_ACCOUNT_ID"));
+            if !is_valid_account_id(&account_id) {
+                return Err(MicroClawError::Config(
+                    "DISCORD_ACCOUNT_ID must use only letters, numbers, '_' or '-'".into(),
+                ));
+            }
+        }
+
         for ch in DYNAMIC_CHANNELS {
             if self.channel_enabled(ch.name) {
+                let account_key = dynamic_account_id_field_key(ch.name);
+                let account_id = account_id_from_value(&self.field_value(&account_key));
+                if !is_valid_account_id(&account_id) {
+                    return Err(MicroClawError::Config(format!(
+                        "{} must use only letters, numbers, '_' or '-'",
+                        account_key
+                    )));
+                }
                 for f in ch.fields {
                     if f.required {
                         let key = dynamic_field_key(ch.name, f.yaml_key);
@@ -1354,6 +1450,7 @@ impl SetupApp {
         let provider = self.field_value("LLM_PROVIDER");
         match key {
             "ENABLED_CHANNELS" => "web".into(),
+            "TELEGRAM_ACCOUNT_ID" | "DISCORD_ACCOUNT_ID" => default_account_id().to_string(),
             "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" | "DISCORD_BOT_TOKEN" | "LLM_API_KEY" => {
                 String::new()
             }
@@ -1371,7 +1468,14 @@ impl SetupApp {
             "MEMORY_TOKEN_BUDGET" => "1500".into(),
             "EMBEDDING_PROVIDER" | "EMBEDDING_API_KEY" | "EMBEDDING_BASE_URL"
             | "EMBEDDING_MODEL" | "EMBEDDING_DIM" => String::new(),
-            _ => String::new(),
+            _ => {
+                for ch in DYNAMIC_CHANNELS {
+                    if key == dynamic_account_id_field_key(ch.name) {
+                        return default_account_id().to_string();
+                    }
+                }
+                String::new()
+            }
         }
     }
 
@@ -1407,9 +1511,12 @@ impl SetupApp {
             "LLM_PROVIDER" | "LLM_API_KEY" | "LLM_MODEL" | "LLM_BASE_URL" => "Model",
             "EMBEDDING_PROVIDER" | "EMBEDDING_API_KEY" | "EMBEDDING_BASE_URL"
             | "EMBEDDING_MODEL" | "EMBEDDING_DIM" => "Embedding",
-            "ENABLED_CHANNELS" | "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" | "DISCORD_BOT_TOKEN" => {
-                "Channel"
-            }
+            "ENABLED_CHANNELS"
+            | "TELEGRAM_BOT_TOKEN"
+            | "BOT_USERNAME"
+            | "TELEGRAM_ACCOUNT_ID"
+            | "DISCORD_BOT_TOKEN"
+            | "DISCORD_ACCOUNT_ID" => "Channel",
             _ => "Setup",
         }
     }
@@ -1419,15 +1526,20 @@ impl SetupApp {
             // Compute ordering based on position in DYNAMIC_CHANNELS
             let mut offset = 0usize;
             for ch in DYNAMIC_CHANNELS {
+                let account_expected = dynamic_account_id_field_key(ch.name);
+                if account_expected == key {
+                    return 26 + offset;
+                }
+                offset += 1;
                 for f in ch.fields {
                     let expected = dynamic_field_key(ch.name, f.yaml_key);
                     if expected == key {
-                        return 24 + offset;
+                        return 26 + offset;
                     }
                     offset += 1;
                 }
             }
-            return 24 + offset;
+            return 26 + offset;
         }
         match key {
             "DATA_DIR" => 0,
@@ -1449,7 +1561,9 @@ impl SetupApp {
             "ENABLED_CHANNELS" => 20,
             "TELEGRAM_BOT_TOKEN" => 21,
             "BOT_USERNAME" => 22,
-            "DISCORD_BOT_TOKEN" => 23,
+            "TELEGRAM_ACCOUNT_ID" => 23,
+            "DISCORD_BOT_TOKEN" => 24,
+            "DISCORD_ACCOUNT_ID" => 25,
             _ => usize::MAX,
         }
     }
@@ -1779,7 +1893,9 @@ fn save_config_yaml(
     let channel_selected = |name: &str| selected_channels.iter().any(|c| c == name);
     let telegram_token = get("TELEGRAM_BOT_TOKEN");
     let telegram_username = get("BOT_USERNAME");
+    let telegram_account_id = account_id_from_value(&get("TELEGRAM_ACCOUNT_ID"));
     let discord_token = get("DISCORD_BOT_TOKEN");
+    let discord_account_id = account_id_from_value(&get("DISCORD_ACCOUNT_ID"));
 
     let telegram_present =
         !telegram_token.trim().is_empty() || !telegram_username.trim().is_empty();
@@ -1815,10 +1931,10 @@ fn save_config_yaml(
         if telegram_present {
             yaml.push_str(&format!(
                 "    default_account: \"{}\"\n",
-                default_account_id()
+                telegram_account_id
             ));
             yaml.push_str("    accounts:\n");
-            yaml.push_str(&format!("      {}:\n", default_account_id()));
+            yaml.push_str(&format!("      {}:\n", telegram_account_id));
             yaml.push_str("        enabled: true\n");
             if !telegram_token.trim().is_empty() {
                 yaml.push_str(&format!("        bot_token: \"{}\"\n", telegram_token));
@@ -1837,10 +1953,10 @@ fn save_config_yaml(
         if discord_present {
             yaml.push_str(&format!(
                 "    default_account: \"{}\"\n",
-                default_account_id()
+                discord_account_id
             ));
             yaml.push_str("    accounts:\n");
-            yaml.push_str(&format!("      {}:\n", default_account_id()));
+            yaml.push_str(&format!("      {}:\n", discord_account_id));
             yaml.push_str("        enabled: true\n");
             if !discord_token.trim().is_empty() {
                 yaml.push_str(&format!("        bot_token: \"{}\"\n", discord_token));
@@ -1859,12 +1975,10 @@ fn save_config_yaml(
         yaml.push_str(&format!("  {}:\n", ch.name));
         yaml.push_str(&format!("    enabled: {}\n", channel_selected(ch.name)));
         if has_presence {
-            yaml.push_str(&format!(
-                "    default_account: \"{}\"\n",
-                default_account_id()
-            ));
+            let account_id = account_id_from_value(&get(&dynamic_account_id_field_key(ch.name)));
+            yaml.push_str(&format!("    default_account: \"{}\"\n", account_id));
             yaml.push_str("    accounts:\n");
-            yaml.push_str(&format!("      {}:\n", default_account_id()));
+            yaml.push_str(&format!("      {}:\n", account_id));
             yaml.push_str("        enabled: true\n");
             for f in ch.fields {
                 let key = dynamic_field_key(ch.name, f.yaml_key);
@@ -2513,6 +2627,7 @@ mod tests {
         values.insert("ENABLED_CHANNELS".into(), "telegram,web".into());
         values.insert("TELEGRAM_BOT_TOKEN".into(), "new_tok".into());
         values.insert("BOT_USERNAME".into(), "new_bot".into());
+        values.insert("TELEGRAM_ACCOUNT_ID".into(), "sales".into());
         values.insert("LLM_PROVIDER".into(), "anthropic".into());
         values.insert("LLM_API_KEY".into(), "key".into());
         values.insert("SANDBOX_ENABLED".into(), "true".into());
@@ -2524,9 +2639,9 @@ mod tests {
         assert!(s.contains("\nchannels:\n"));
         assert!(s.contains("  telegram:\n"));
         assert!(s.contains("    enabled: true\n"));
-        assert!(s.contains("    default_account: \"main\"\n"));
+        assert!(s.contains("    default_account: \"sales\"\n"));
         assert!(s.contains("    accounts:\n"));
-        assert!(s.contains("      main:\n"));
+        assert!(s.contains("      sales:\n"));
         assert!(s.contains("        enabled: true\n"));
         assert!(s.contains("        bot_token: \"new_tok\"\n"));
         assert!(s.contains("        bot_username: \"new_bot\"\n"));
@@ -2582,6 +2697,7 @@ sandbox:
         let mut values = HashMap::new();
         values.insert("ENABLED_CHANNELS".into(), "".into());
         values.insert("DISCORD_BOT_TOKEN".into(), "discord_token_123".into());
+        values.insert("DISCORD_ACCOUNT_ID".into(), "ops".into());
         values.insert("LLM_PROVIDER".into(), "anthropic".into());
         values.insert("LLM_API_KEY".into(), "key".into());
 
@@ -2592,8 +2708,8 @@ sandbox:
         assert!(s.contains("  mode: \"off\"\n"));
         assert!(s.contains("  discord:\n"));
         assert!(s.contains("    enabled: false\n"));
-        assert!(s.contains("    default_account: \"main\"\n"));
-        assert!(s.contains("      main:\n"));
+        assert!(s.contains("    default_account: \"ops\"\n"));
+        assert!(s.contains("      ops:\n"));
         assert!(s.contains("        bot_token: \"discord_token_123\"\n"));
         assert!(s.contains("  web:\n"));
         assert!(s.contains("    enabled: true\n"));
@@ -2636,6 +2752,7 @@ sandbox:
         values.insert("ENABLED_CHANNELS".into(), "discord".into());
         values.insert("TELEGRAM_BOT_TOKEN".into(), "tg_token_123".into());
         values.insert("BOT_USERNAME".into(), "tg_bot".into());
+        values.insert("TELEGRAM_ACCOUNT_ID".into(), "team_a".into());
         values.insert("DISCORD_BOT_TOKEN".into(), "discord_token_123".into());
         values.insert("LLM_PROVIDER".into(), "anthropic".into());
         values.insert("LLM_API_KEY".into(), "key".into());
@@ -2644,8 +2761,8 @@ sandbox:
         let s = fs::read_to_string(&yaml_path).unwrap();
         assert!(s.contains("  telegram:\n"));
         assert!(s.contains("    enabled: false\n"));
-        assert!(s.contains("    default_account: \"main\"\n"));
-        assert!(s.contains("      main:\n"));
+        assert!(s.contains("    default_account: \"team_a\"\n"));
+        assert!(s.contains("      team_a:\n"));
         assert!(s.contains("        bot_token: \"tg_token_123\"\n"));
         assert!(s.contains("        bot_username: \"tg_bot\"\n"));
 
@@ -2668,7 +2785,10 @@ sandbox:
         let hidden_keys = vec![
             "TELEGRAM_BOT_TOKEN".to_string(),
             "BOT_USERNAME".to_string(),
+            "TELEGRAM_ACCOUNT_ID".to_string(),
             "DISCORD_BOT_TOKEN".to_string(),
+            "DISCORD_ACCOUNT_ID".to_string(),
+            dynamic_account_id_field_key("feishu"),
             dynamic_field_key("feishu", "app_id"),
             dynamic_field_key("feishu", "app_secret"),
             dynamic_field_key("feishu", "domain"),
@@ -2692,6 +2812,8 @@ sandbox:
         let shown_keys = vec![
             "TELEGRAM_BOT_TOKEN".to_string(),
             "BOT_USERNAME".to_string(),
+            "TELEGRAM_ACCOUNT_ID".to_string(),
+            dynamic_account_id_field_key("feishu"),
             dynamic_field_key("feishu", "app_id"),
             dynamic_field_key("feishu", "app_secret"),
             dynamic_field_key("feishu", "domain"),
@@ -2713,6 +2835,7 @@ sandbox:
 
         let mut values = HashMap::new();
         values.insert("ENABLED_CHANNELS".into(), "".into());
+        values.insert(dynamic_account_id_field_key("feishu"), "support".into());
         values.insert(dynamic_field_key("feishu", "app_id"), "app_id_1".into());
         values.insert(
             dynamic_field_key("feishu", "app_secret"),
@@ -2727,8 +2850,8 @@ sandbox:
         assert!(s.contains("\nchannels:\n"));
         assert!(s.contains("  feishu:\n"));
         assert!(s.contains("    enabled: false\n"));
-        assert!(s.contains("    default_account: \"main\"\n"));
-        assert!(s.contains("      main:\n"));
+        assert!(s.contains("    default_account: \"support\"\n"));
+        assert!(s.contains("      support:\n"));
         assert!(s.contains("        app_id: \"app_id_1\""));
         assert!(s.contains("        app_secret: \"app_secret_1\""));
 
@@ -2744,6 +2867,7 @@ sandbox:
 
         let mut values = HashMap::new();
         values.insert("ENABLED_CHANNELS".into(), "feishu".into());
+        values.insert(dynamic_account_id_field_key("feishu"), "ops".into());
         values.insert(dynamic_field_key("feishu", "app_id"), "app_id_1".into());
         values.insert(
             dynamic_field_key("feishu", "app_secret"),
@@ -2758,13 +2882,45 @@ sandbox:
         assert!(s.contains("\nchannels:\n"));
         assert!(s.contains("  feishu:\n"));
         assert!(s.contains("    enabled: true\n"));
-        assert!(s.contains("    default_account: \"main\"\n"));
-        assert!(s.contains("      main:\n"));
+        assert!(s.contains("    default_account: \"ops\"\n"));
+        assert!(s.contains("      ops:\n"));
         assert!(s.contains("        app_id: \"app_id_1\""));
         assert!(s.contains("        app_secret: \"app_secret_1\""));
         assert!(!s.contains("        domain: \"feishu\""));
 
         let _ = fs::remove_file(&yaml_path);
+    }
+
+    #[test]
+    fn test_validate_local_rejects_invalid_account_id() {
+        let mut app = SetupApp::new();
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "ENABLED_CHANNELS") {
+            field.value = "telegram".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "TELEGRAM_BOT_TOKEN")
+        {
+            field.value = "123456:token".to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "BOT_USERNAME") {
+            field.value = "botname".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "TELEGRAM_ACCOUNT_ID")
+        {
+            field.value = "invalid account".to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_API_KEY") {
+            field.value = "key".to_string();
+        }
+        let err = app.validate_local().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("TELEGRAM_ACCOUNT_ID must use only letters, numbers, '_' or '-'"));
     }
 
     #[test]
