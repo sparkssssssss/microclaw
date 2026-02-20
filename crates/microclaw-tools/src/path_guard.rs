@@ -71,7 +71,20 @@ fn normalize_path(path: &Path) -> PathBuf {
 pub fn is_blocked(path: &Path) -> bool {
     // Try to resolve symlinks; if the file doesn't exist, fall back to
     // logical normalization so that `..` components are still resolved.
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| normalize_path(path));
+    // For relative paths, prepend the working directory first so `..`
+    // at the start can be resolved against the absolute prefix.
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let abs = if path.is_relative() {
+            if let Ok(cwd) = std::env::current_dir() {
+                cwd.join(path)
+            } else {
+                path.to_path_buf()
+            }
+        } else {
+            path.to_path_buf()
+        };
+        normalize_path(&abs)
+    });
 
     // Check against blocked absolute paths (both original and resolved)
     let original_str = path.to_string_lossy();
