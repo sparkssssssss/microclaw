@@ -9,7 +9,6 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-11-05";
-const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_MAX_RETRIES: u32 = 2;
 const DEFAULT_HEALTH_INTERVAL_SECS: u64 = 60;
 const TOOLS_CACHE_TTL_SECS: u64 = 300;
@@ -46,6 +45,15 @@ struct JsonRpcError {
 
 fn default_transport() -> String {
     "stdio".to_string()
+}
+
+fn resolve_request_timeout_secs(
+    config_timeout_secs: Option<u64>,
+    default_request_timeout_secs: u64,
+) -> u64 {
+    config_timeout_secs
+        .unwrap_or(default_request_timeout_secs)
+        .max(1)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -207,6 +215,7 @@ impl McpServer {
         name: &str,
         config: &McpServerConfig,
         default_protocol_version: Option<&str>,
+        default_request_timeout_secs: u64,
     ) -> Result<Self, String> {
         let requested_protocol = config
             .protocol_version
@@ -214,11 +223,10 @@ impl McpServer {
             .or_else(|| default_protocol_version.map(|v| v.to_string()))
             .unwrap_or_else(|| DEFAULT_PROTOCOL_VERSION.to_string());
 
-        let request_timeout = Duration::from_secs(
-            config
-                .request_timeout_secs
-                .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS),
-        );
+        let request_timeout = Duration::from_secs(resolve_request_timeout_secs(
+            config.request_timeout_secs,
+            default_request_timeout_secs,
+        ));
         let max_retries = config.max_retries.unwrap_or(DEFAULT_MAX_RETRIES);
         let transport_name = config.transport.trim().to_ascii_lowercase();
 
@@ -837,7 +845,9 @@ pub struct McpManager {
 }
 
 impl McpManager {
-    pub async fn from_config_file(path: &str) -> Self {
+    pub async fn from_config_file(path: &str, default_request_timeout_secs: u64) -> Self {
+        let default_request_timeout_secs =
+            resolve_request_timeout_secs(None, default_request_timeout_secs);
         let config_str = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(_) => {
@@ -867,6 +877,7 @@ impl McpManager {
                     name,
                     server_config,
                     config.default_protocol_version.as_deref(),
+                    default_request_timeout_secs,
                 ),
             )
             .await
@@ -964,5 +975,13 @@ mod tests {
         assert_eq!(remote.endpoint, "http://127.0.0.1:8080/mcp");
         assert_eq!(remote.max_retries, Some(3));
         assert_eq!(remote.health_interval_secs, Some(15));
+    }
+
+    #[test]
+    fn test_resolve_request_timeout_secs_prefers_server_override() {
+        assert_eq!(resolve_request_timeout_secs(Some(25), 90), 25);
+        assert_eq!(resolve_request_timeout_secs(None, 90), 90);
+        assert_eq!(resolve_request_timeout_secs(Some(0), 90), 1);
+        assert_eq!(resolve_request_timeout_secs(None, 0), 1);
     }
 }

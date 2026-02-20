@@ -69,3 +69,27 @@ When any burn alert is active:
 - Replay behavior:
   - re-queues task with immediate `next_run`
   - marks DLQ entry as replayed with a replay note (`queued` or `skipped` reason)
+
+## Timeout Budget Tuning
+
+- Global tool timeout default: `default_tool_timeout_secs`
+- Per-tool timeout overrides: `tool_timeout_overrides.<tool_name>`
+- Global MCP request timeout default: `default_mcp_request_timeout_secs`
+- MCP per-server override remains supported in `mcp.json`:
+  - `mcpServers.<name>.request_timeout_secs`
+
+Precedence:
+- Tools: input `timeout_secs` > `tool_timeout_overrides` > `default_tool_timeout_secs`
+- MCP: server `request_timeout_secs` > `default_mcp_request_timeout_secs`
+
+Example config:
+
+```yaml
+default_tool_timeout_secs: 30
+tool_timeout_overrides:
+  bash: 90
+  browser: 45
+  web_fetch: 20
+  web_search: 20
+default_mcp_request_timeout_secs: 120
+```
