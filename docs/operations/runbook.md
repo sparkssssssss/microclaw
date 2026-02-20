@@ -93,3 +93,30 @@ tool_timeout_overrides:
   web_search: 20
 default_mcp_request_timeout_secs: 120
 ```
+
+## MCP Reliability Tuning
+
+- `mcp.json` supports per-server circuit breaker knobs:
+  - `circuit_breaker_failure_threshold` (default `5`)
+  - `circuit_breaker_cooldown_secs` (default `30`)
+- `request_timeout_secs` remains per-server timeout budget.
+
+Example:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "request_timeout_secs": 120,
+      "circuit_breaker_failure_threshold": 5,
+      "circuit_breaker_cooldown_secs": 30
+    }
+  }
+}
+```
+
+Behavior:
+- consecutive MCP request failures trip the breaker and short-circuit calls during cooldown.
+- after cooldown, requests are attempted again automatically.
