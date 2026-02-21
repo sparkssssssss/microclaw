@@ -11,7 +11,7 @@ use crate::agent_engine::archive_conversation;
 use crate::agent_engine::process_with_agent_with_events;
 use crate::agent_engine::AgentEvent;
 use crate::agent_engine::AgentRequestContext;
-use crate::channels::commands::{build_model_response, build_status_response};
+use crate::chat_commands::{build_model_response, build_status_response};
 use crate::runtime::AppState;
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
