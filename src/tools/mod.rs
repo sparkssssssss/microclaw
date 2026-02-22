@@ -304,7 +304,7 @@ impl ToolRegistry {
         {
             return ToolResult::error(msg).with_error_type("execution_policy_blocked");
         }
-        if let Some(blocked) = require_high_risk_approval(name, auth) {
+        if let Some(blocked) = require_high_risk_approval(name, auth, &input) {
             return blocked;
         }
 
@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_high_risk_tool_requires_second_approval_on_web() {
+    async fn test_high_risk_tool_requires_explicit_approval_on_web() {
         let registry = ToolRegistry {
             sandbox_mode: SandboxMode::Off,
             sandbox_runtime_available: false,
@@ -478,19 +478,27 @@ mod tests {
             control_chat_ids: vec![],
         };
 
-        // First call: blocked with approval_required
         let first = registry.execute_with_auth("bash", json!({}), &auth).await;
         assert!(first.is_error);
         assert_eq!(first.error_type.as_deref(), Some("approval_required"));
 
-        // Second call: auto-approved on retry (no token needed)
         let second = registry.execute_with_auth("bash", json!({}), &auth).await;
-        assert!(!second.is_error);
-        assert_eq!(second.content, "ok");
+        assert!(second.is_error);
+        assert_eq!(second.error_type.as_deref(), Some("approval_required"));
+
+        let approved = registry
+            .execute_with_auth(
+                "bash",
+                json!({"__microclaw_high_risk_approved": true}),
+                &auth,
+            )
+            .await;
+        assert!(!approved.is_error);
+        assert_eq!(approved.content, "ok");
     }
 
     #[tokio::test]
-    async fn test_high_risk_tool_requires_second_approval_on_control_chat() {
+    async fn test_high_risk_tool_requires_explicit_approval_on_control_chat() {
         let registry = ToolRegistry {
             sandbox_mode: SandboxMode::Off,
             sandbox_runtime_available: false,
@@ -508,6 +516,16 @@ mod tests {
         let first = registry.execute_with_auth("bash", json!({}), &auth).await;
         assert!(first.is_error);
         assert_eq!(first.error_type.as_deref(), Some("approval_required"));
+
+        let approved = registry
+            .execute_with_auth(
+                "bash",
+                json!({"__microclaw_high_risk_approved": true}),
+                &auth,
+            )
+            .await;
+        assert!(!approved.is_error);
+        assert_eq!(approved.content, "ok");
     }
 
     #[tokio::test]

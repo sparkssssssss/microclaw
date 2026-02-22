@@ -1,7 +1,4 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
 
 use async_trait::async_trait;
 use microclaw_core::llm_types::ToolDefinition;
@@ -280,54 +277,33 @@ fn requires_high_risk_approval(name: &str, auth: &ToolAuthContext) -> bool {
     tool_risk(name) == ToolRisk::High && (auth.caller_channel == "web" || auth.is_control_chat())
 }
 
-fn approval_key(auth: &ToolAuthContext, tool_name: &str) -> String {
-    format!(
-        "{}:{}:{}",
-        auth.caller_channel, auth.caller_chat_id, tool_name
-    )
-}
+const HIGH_RISK_APPROVED_KEY: &str = "__microclaw_high_risk_approved";
 
-fn pending_approvals() -> &'static Mutex<HashMap<String, Instant>> {
-    static PENDING: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
-    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-pub fn require_high_risk_approval(name: &str, auth: &ToolAuthContext) -> Option<ToolResult> {
+pub fn require_high_risk_approval(
+    name: &str,
+    auth: &ToolAuthContext,
+    input: &serde_json::Value,
+) -> Option<ToolResult> {
     if !requires_high_risk_approval(name, auth) {
         return None;
     }
 
-    let key = approval_key(auth, name);
-    let mut pending = pending_approvals()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
-    if let Some(&created_at) = pending.get(&key) {
-        if created_at.elapsed().as_secs() < 120 {
-            tracing::warn!(
-                tool = name,
-                channel = auth.caller_channel.as_str(),
-                chat_id = auth.caller_chat_id,
-                elapsed_secs = created_at.elapsed().as_secs(),
-                "Auto-approved high-risk tool on retry"
-            );
-            pending.remove(&key);
-            None
-        } else {
-            pending.insert(key, Instant::now());
-            Some(
-                ToolResult::error(format!(
-                    "Approval expired for high-risk tool '{name}' (risk: {}). Re-run the same tool call to confirm.",
-                    tool_risk(name).as_str(),
-                ))
-                .with_error_type("approval_required"),
-            )
-        }
+    let approved = input
+        .get(HIGH_RISK_APPROVED_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if approved {
+        tracing::warn!(
+            tool = name,
+            channel = auth.caller_channel.as_str(),
+            chat_id = auth.caller_chat_id,
+            "Executing high-risk tool with explicit approval marker"
+        );
+        None
     } else {
-        pending.insert(key, Instant::now());
         Some(
             ToolResult::error(format!(
-                "Approval required for high-risk tool '{name}' (risk: {}). Re-run the same tool call to confirm.",
+                "Approval required for high-risk tool '{name}' (risk: {}). Add `{HIGH_RISK_APPROVED_KEY}: true` only after explicit operator approval.",
                 tool_risk(name).as_str(),
             ))
             .with_error_type("approval_required"),
