@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::deserialized_responses::EncryptionInfo;
-use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent, SyncRoomMessageEvent};
+use matrix_sdk::ruma::events::room::message::{
+    MessageType, RoomMessageEventContent, SyncRoomMessageEvent,
+};
 use matrix_sdk::ruma::{OwnedDeviceId, OwnedRoomId, OwnedUserId};
 use matrix_sdk::{Client, SessionMeta, SessionTokens};
 use serde::Deserialize;
@@ -105,32 +107,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let watched_room = room_id.clone();
     let watched_bot = bot_user_id.clone();
     let tx = Arc::new(tx);
-    client.add_event_handler(move |ev: SyncRoomMessageEvent, room: matrix_sdk::Room, encryption_info: Option<EncryptionInfo>| {
-        let tx = tx.clone();
-        let watched_room = watched_room.clone();
-        let watched_bot = watched_bot.clone();
-        async move {
-            if encryption_info.is_none() {
-                return;
+    client.add_event_handler(
+        move |ev: SyncRoomMessageEvent,
+              room: matrix_sdk::Room,
+              encryption_info: Option<EncryptionInfo>| {
+            let tx = tx.clone();
+            let watched_room = watched_room.clone();
+            let watched_bot = watched_bot.clone();
+            async move {
+                if encryption_info.is_none() {
+                    return;
+                }
+                let watched_room_ref: &matrix_sdk::ruma::RoomId =
+                    <OwnedRoomId as AsRef<matrix_sdk::ruma::RoomId>>::as_ref(&watched_room);
+                if room.room_id() != watched_room_ref {
+                    return;
+                }
+                let SyncRoomMessageEvent::Original(ev) = ev else {
+                    return;
+                };
+                if ev.sender != watched_bot {
+                    return;
+                }
+                let body = match &ev.content.msgtype {
+                    MessageType::Text(text) => text.body.clone(),
+                    _ => return,
+                };
+                let _ = tx.send(body);
             }
-            let watched_room_ref: &matrix_sdk::ruma::RoomId =
-                <OwnedRoomId as AsRef<matrix_sdk::ruma::RoomId>>::as_ref(&watched_room);
-            if room.room_id() != watched_room_ref {
-                return;
-            }
-            let SyncRoomMessageEvent::Original(ev) = ev else {
-                return;
-            };
-            if ev.sender != watched_bot {
-                return;
-            }
-            let body = match &ev.content.msgtype {
-                MessageType::Text(text) => text.body.clone(),
-                _ => return,
-            };
-            let _ = tx.send(body);
-        }
-    });
+        },
+    );
 
     client
         .sync_once(SyncSettings::default().timeout(Duration::from_millis(500)))
@@ -139,7 +145,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let room = client
         .get_room(&room_id)
         .ok_or_else(|| format!("room {room_id} not found in client store"))?;
-    room.send(RoomMessageEventContent::text_plain(message)).await?;
+    room.send(RoomMessageEventContent::text_plain(message))
+        .await?;
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
