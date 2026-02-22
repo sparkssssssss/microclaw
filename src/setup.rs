@@ -25,10 +25,10 @@ use crate::config::{Config, SandboxBackend, SandboxMode};
 use microclaw_core::error::MicroClawError;
 use microclaw_core::text::floor_char_boundary;
 
-use crate::channels::setup_def::DynamicChannelDef;
 use crate::channels::{
     dingtalk, email, feishu, imessage, irc, matrix, nostr, qq, signal, slack, whatsapp,
 };
+use crate::setup_def::DynamicChannelDef;
 
 // Declarative channel metadata is owned by each channel module.
 const DYNAMIC_CHANNELS: &[DynamicChannelDef] = &[

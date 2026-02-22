@@ -5,8 +5,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tracing::{error, info};
 
-use crate::channels::setup_def::{ChannelFieldDef, DynamicChannelDef};
 use crate::runtime::AppState;
+use crate::setup_def::{ChannelFieldDef, DynamicChannelDef};
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
 use microclaw_core::text::split_text;
