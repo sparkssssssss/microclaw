@@ -700,6 +700,13 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
             let SyncRoomMessageEvent::Original(ev) = ev else {
                 return;
             };
+            if ev
+                .sender
+                .as_str()
+                .eq_ignore_ascii_case(&runtime.bot_user_id)
+            {
+                return;
+            }
             let Some(body) = normalize_matrix_sdk_message_type(&ev.content.msgtype) else {
                 return;
             };
@@ -749,6 +756,13 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
             let SyncReactionEvent::Original(ev) = ev else {
                 return;
             };
+            if ev
+                .sender
+                .as_str()
+                .eq_ignore_ascii_case(&runtime.bot_user_id)
+            {
+                return;
+            }
             let room_id = room.room_id().to_string();
             let mut is_direct = room.is_direct().await.unwrap_or(false);
             if !is_direct {
