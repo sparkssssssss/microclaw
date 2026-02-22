@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -7,7 +8,6 @@ use std::time::Duration;
 use matrix_sdk::attachment::AttachmentConfig;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::config::SyncSettings as MatrixSyncSettings;
-use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::ruma::events::reaction::{ReactionEventContent, SyncReactionEvent};
 use matrix_sdk::ruma::events::relation::Annotation;
 use matrix_sdk::ruma::events::room::message::{
@@ -382,6 +382,12 @@ pub async fn start_matrix_bot(app_state: Arc<AppState>, runtime: MatrixRuntimeCo
         tokio::spawn(async move {
             start_matrix_e2ee_sync(e2ee_state, runtime_with_sdk).await;
         });
+
+        info!(
+            "Matrix adapter '{}' using SDK sync path",
+            runtime.channel_name.as_str()
+        );
+        return;
     }
 
     let mut since: Option<String> = None;
@@ -543,19 +549,75 @@ async fn build_matrix_sdk_client(
     }
 
     if !runtime.backup_key.trim().is_empty() {
-        if let Err(e) = sdk_client
-            .encryption()
-            .recovery()
-            .recover(runtime.backup_key.trim())
-            .await
-        {
-            warn!("Matrix SDK recovery setup failed with configured backup_key: {e}");
-        } else {
-            info!("Matrix SDK recovery initialized from configured backup_key");
+        let mut recovered = false;
+        let mut last_err: Option<String> = None;
+        for candidate in matrix_backup_key_candidates(runtime.backup_key.trim()) {
+            match sdk_client.encryption().recovery().recover(&candidate).await {
+                Ok(()) => {
+                    recovered = true;
+                    info!("Matrix SDK recovery initialized from configured backup_key");
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                }
+            }
+        }
+
+        if !recovered {
+            warn!(
+                "Matrix SDK recovery setup failed with configured backup_key (all formats): {}",
+                last_err.unwrap_or_else(|| "unknown error".to_string())
+            );
         }
     }
 
     Some(sdk_client)
+}
+
+fn matrix_backup_key_candidates(raw_key: &str) -> Vec<String> {
+    let trimmed = raw_key.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_unique = |v: String| {
+        let k = v.trim().to_string();
+        if !k.is_empty() && seen.insert(k.clone()) {
+            out.push(k);
+        }
+    };
+
+    push_unique(trimmed.to_string());
+
+    let space_normalized = trimmed
+        .chars()
+        .map(|c| if c == '-' || c == '_' { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    push_unique(space_normalized);
+
+    let compact = trimmed
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>();
+    push_unique(compact.clone());
+    if compact.len() >= 8 {
+        let grouped = compact
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(4)
+            .map(|chunk| chunk.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join(" ");
+        push_unique(grouped);
+    }
+
+    out
 }
 
 fn matrix_channel_slug(channel_name: &str) -> String {
@@ -597,101 +659,93 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
     let handler_runtime = runtime.clone();
     let handler_boot = bootstrapped.clone();
 
-    client.add_event_handler(
-        move |ev: SyncRoomMessageEvent,
-              room: MatrixSdkRoom,
-              encryption_info: Option<EncryptionInfo>| {
-            let app_state = handler_state.clone();
-            let runtime = handler_runtime.clone();
-            let bootstrapped = handler_boot.clone();
-            async move {
-                if encryption_info.is_none()
-                    || !bootstrapped.load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    return;
-                }
-                let SyncRoomMessageEvent::Original(ev) = ev else {
-                    return;
-                };
-                let Some(body) = normalize_matrix_sdk_message_type(&ev.content.msgtype) else {
-                    return;
-                };
-                if body.trim().is_empty() {
-                    return;
-                }
-                let mentioned_bot = is_bot_mentioned_in_mentions(
-                    ev.content.mentions.as_ref(),
-                    &runtime.bot_user_id,
-                );
-                let room_id = room.room_id().to_string();
-                let is_direct = room
-                    .is_direct()
-                    .await
-                    .unwrap_or_else(|_| room.active_members_count() <= 2);
-                if !is_direct && !runtime.should_process_group_room(&room_id) {
-                    return;
-                }
-                if is_direct && !runtime.should_process_dm_sender(ev.sender.as_str()) {
-                    return;
-                }
-                let msg = MatrixIncomingMessage {
-                    room_id,
-                    is_direct,
-                    sender: ev.sender.to_string(),
-                    event_id: ev.event_id.to_string(),
-                    body,
-                    mentioned_bot,
-                    prefer_sdk_send: true,
-                };
-                handle_matrix_message(app_state, runtime, msg).await;
+    client.add_event_handler(move |ev: SyncRoomMessageEvent, room: MatrixSdkRoom| {
+        let app_state = handler_state.clone();
+        let runtime = handler_runtime.clone();
+        let bootstrapped = handler_boot.clone();
+        async move {
+            if !bootstrapped.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
             }
-        },
-    );
+            let SyncRoomMessageEvent::Original(ev) = ev else {
+                return;
+            };
+            let Some(body) = normalize_matrix_sdk_message_type(&ev.content.msgtype) else {
+                return;
+            };
+            if body.trim().is_empty() {
+                return;
+            }
+            let mentioned_bot =
+                is_bot_mentioned_in_mentions(ev.content.mentions.as_ref(), &runtime.bot_user_id);
+            let room_id = room.room_id().to_string();
+            let mut is_direct = room.is_direct().await.unwrap_or(false);
+            if !is_direct {
+                let members = room.active_members_count();
+                if members > 0 && members <= 2 {
+                    is_direct = true;
+                }
+            }
+            if !is_direct && !runtime.should_process_group_room(&room_id) {
+                return;
+            }
+            if is_direct && !runtime.should_process_dm_sender(ev.sender.as_str()) {
+                return;
+            }
+            let msg = MatrixIncomingMessage {
+                room_id,
+                is_direct,
+                sender: ev.sender.to_string(),
+                event_id: ev.event_id.to_string(),
+                body,
+                mentioned_bot,
+                prefer_sdk_send: true,
+            };
+            handle_matrix_message(app_state, runtime, msg).await;
+        }
+    });
 
     let reaction_state = app_state.clone();
     let reaction_runtime = runtime.clone();
     let reaction_boot = bootstrapped.clone();
-    client.add_event_handler(
-        move |ev: SyncReactionEvent,
-              room: MatrixSdkRoom,
-              encryption_info: Option<EncryptionInfo>| {
-            let app_state = reaction_state.clone();
-            let runtime = reaction_runtime.clone();
-            let bootstrapped = reaction_boot.clone();
-            async move {
-                if encryption_info.is_none()
-                    || !bootstrapped.load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    return;
-                }
-                let SyncReactionEvent::Original(ev) = ev else {
-                    return;
-                };
-                let room_id = room.room_id().to_string();
-                let is_direct = room
-                    .is_direct()
-                    .await
-                    .unwrap_or_else(|_| room.active_members_count() <= 2);
-                if !is_direct && !runtime.should_process_group_room(&room_id) {
-                    return;
-                }
-                if is_direct && !runtime.should_process_dm_sender(ev.sender.as_str()) {
-                    return;
-                }
-                handle_matrix_reaction(
-                    app_state,
-                    runtime,
-                    room_id,
-                    is_direct,
-                    ev.sender.to_string(),
-                    ev.event_id.to_string(),
-                    ev.content.relates_to.event_id.to_string(),
-                    ev.content.relates_to.key.clone(),
-                )
-                .await;
+    client.add_event_handler(move |ev: SyncReactionEvent, room: MatrixSdkRoom| {
+        let app_state = reaction_state.clone();
+        let runtime = reaction_runtime.clone();
+        let bootstrapped = reaction_boot.clone();
+        async move {
+            if !bootstrapped.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
             }
-        },
-    );
+            let SyncReactionEvent::Original(ev) = ev else {
+                return;
+            };
+            let room_id = room.room_id().to_string();
+            let mut is_direct = room.is_direct().await.unwrap_or(false);
+            if !is_direct {
+                let members = room.active_members_count();
+                if members > 0 && members <= 2 {
+                    is_direct = true;
+                }
+            }
+            if !is_direct && !runtime.should_process_group_room(&room_id) {
+                return;
+            }
+            if is_direct && !runtime.should_process_dm_sender(ev.sender.as_str()) {
+                return;
+            }
+            handle_matrix_reaction(
+                app_state,
+                runtime,
+                room_id,
+                is_direct,
+                ev.sender.to_string(),
+                ev.event_id.to_string(),
+                ev.content.relates_to.event_id.to_string(),
+                ev.content.relates_to.key.clone(),
+            )
+            .await;
+        }
+    });
 
     loop {
         let settings = || {
@@ -1648,7 +1702,7 @@ async fn handle_matrix_message(
         AgentRequestContext {
             caller_channel: &runtime.channel_name,
             chat_id,
-            chat_type: "group",
+            chat_type: if msg.is_direct { "private" } else { "group" },
         },
         None,
         None,
@@ -1751,9 +1805,9 @@ async fn handle_matrix_message(
 mod tests {
     use super::{
         extract_matrix_user_ids, is_bot_mentioned_in_mentions, looks_like_reaction_token,
-        matrix_channel_slug, matrix_mentions_for_text, matrix_message_payload_for_text,
-        matrix_sdk_clients, normalize_matrix_message_body, normalize_matrix_sdk_message_type,
-        MatrixRuntimeContext, Mentions,
+        matrix_backup_key_candidates, matrix_channel_slug, matrix_mentions_for_text,
+        matrix_message_payload_for_text, matrix_sdk_clients, normalize_matrix_message_body,
+        normalize_matrix_sdk_message_type, MatrixRuntimeContext, Mentions,
     };
     use matrix_sdk::ruma::events::room::message::{
         AudioMessageEventContent, FileMessageEventContent, ImageMessageEventContent, MessageType,
@@ -1964,5 +2018,13 @@ mod tests {
         assert_eq!(matrix_channel_slug("matrix"), "matrix");
         assert_eq!(matrix_channel_slug("matrix.primary"), "matrix_primary");
         assert_eq!(matrix_channel_slug("matrix/tenant#1"), "matrix_tenant_1");
+    }
+
+    #[test]
+    fn test_matrix_backup_key_candidates_normalize_common_formats() {
+        let candidates = matrix_backup_key_candidates("C1E7-44EC-DE73-7A4B");
+        assert!(candidates.contains(&"C1E7-44EC-DE73-7A4B".to_string()));
+        assert!(candidates.contains(&"C1E7 44EC DE73 7A4B".to_string()));
+        assert!(candidates.contains(&"C1E744ECDE737A4B".to_string()));
     }
 }
