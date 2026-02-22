@@ -922,6 +922,26 @@ impl Tool for PluginTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn make_temp_plugins_dir(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "microclaw_plugin_tests_{}_{}",
+            name,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn config_with_plugins_dir(dir: &Path) -> Config {
+        let mut cfg = crate::config::Config::test_defaults();
+        cfg.plugins.enabled = true;
+        cfg.plugins.dir = Some(dir.to_string_lossy().to_string());
+        cfg.working_dir = dir.join("work").to_string_lossy().to_string();
+        cfg
+    }
 
     #[test]
     fn test_command_matches_first_token() {
@@ -1021,5 +1041,190 @@ mod tests {
         assert!(!errors.is_empty());
         assert!(errors.iter().any(|e| e.contains("duplicate command")));
         assert!(errors.iter().any(|e| e.contains("duplicate tool")));
+    }
+
+    #[test]
+    fn test_plugin_admin_requires_control_chat() {
+        let root = make_temp_plugins_dir("admin_perm");
+        let cfg = config_with_plugins_dir(&root);
+        let out = handle_plugins_admin_command(&cfg, 123, "/plugins list").unwrap();
+        assert!(out.contains("require control chat"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_plugin_admin_list_and_validate() {
+        let root = make_temp_plugins_dir("admin_list_validate");
+        std::fs::write(
+            root.join("good.yaml"),
+            r#"
+name: good
+enabled: true
+commands:
+  - command: /ok
+    response: "ok"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("bad.yaml"),
+            r#"
+name: bad
+enabled: true
+commands:
+  - command: /
+    run:
+      command: ""
+"#,
+        )
+        .unwrap();
+
+        let mut cfg = config_with_plugins_dir(&root);
+        cfg.control_chat_ids = vec![42];
+        let list = handle_plugins_admin_command(&cfg, 42, "/plugins list").unwrap();
+        assert!(list.contains("Plugins"));
+        assert!(list.contains("good"));
+        let validate = handle_plugins_admin_command(&cfg, 42, "/plugins validate").unwrap();
+        assert!(validate.contains("issue"));
+        assert!(validate.contains("invalid command"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn test_plugin_slash_command_permissions_matrix() {
+        let root = make_temp_plugins_dir("slash_perm");
+        std::fs::write(
+            root.join("cmd.yaml"),
+            r#"
+name: cmds
+enabled: true
+commands:
+  - command: /hello
+    response: "hello {{channel}}"
+    permissions:
+      allowed_channels: ["telegram"]
+  - command: /secure
+    response: "secure-ok"
+    permissions:
+      require_control_chat: true
+"#,
+        )
+        .unwrap();
+
+        let mut cfg = config_with_plugins_dir(&root);
+        cfg.control_chat_ids = vec![100];
+
+        let denied_channel = execute_plugin_slash_command(&cfg, "discord", 100, "/hello")
+            .await
+            .unwrap();
+        assert!(denied_channel.contains("not allowed"));
+
+        let allowed_channel = execute_plugin_slash_command(&cfg, "telegram", 100, "/hello")
+            .await
+            .unwrap();
+        assert!(allowed_channel.contains("hello telegram"));
+
+        let denied_control = execute_plugin_slash_command(&cfg, "telegram", 101, "/secure")
+            .await
+            .unwrap();
+        assert!(denied_control.contains("requires control chat"));
+
+        let allowed_control = execute_plugin_slash_command(&cfg, "telegram", 100, "/secure")
+            .await
+            .unwrap();
+        assert_eq!(allowed_control, "secure-ok");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn test_plugin_tool_execution_policy_matrix() {
+        let root = make_temp_plugins_dir("tool_policy");
+        std::fs::write(
+            root.join("tool.yaml"),
+            r#"
+name: tools
+enabled: true
+tools:
+  - name: sandbox_tool
+    description: sandbox only
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+    run:
+      command: "printf sandbox"
+      timeout_secs: 5
+      execution_policy: sandbox_only
+  - name: dual_tool
+    description: dual mode
+    input_schema:
+      type: object
+      properties: {}
+      required: []
+    run:
+      command: "printf dual-ok"
+      timeout_secs: 5
+      execution_policy: dual
+"#,
+        )
+        .unwrap();
+
+        let cfg = config_with_plugins_dir(&root);
+        let auth_input = json!({
+            "__microclaw_auth": {
+                "caller_channel": "web",
+                "caller_chat_id": 9,
+                "control_chat_ids": []
+            }
+        });
+
+        let blocked = execute_dynamic_plugin_tool(&cfg, "sandbox_tool", auth_input.clone())
+            .await
+            .unwrap();
+        assert!(blocked.is_error);
+        assert_eq!(blocked.error_type.as_deref(), Some("plugin_spawn_error"));
+        assert!(blocked.content.contains("execution policy"));
+
+        let dual = execute_dynamic_plugin_tool(&cfg, "dual_tool", auth_input)
+            .await
+            .unwrap();
+        assert!(!dual.is_error, "{}", dual.content);
+        assert!(dual.content.contains("dual-ok"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_plugin_report_detects_duplicate_plugin_names_across_files() {
+        let root = make_temp_plugins_dir("dupe_plugin_names");
+        std::fs::write(
+            root.join("a.yaml"),
+            r#"
+name: dup
+enabled: true
+commands:
+  - command: /a
+    response: "a"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b.yaml"),
+            r#"
+name: dup
+enabled: true
+commands:
+  - command: /b
+    response: "b"
+"#,
+        )
+        .unwrap();
+
+        let cfg = config_with_plugins_dir(&root);
+        let report = load_plugin_report(&cfg);
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.contains("duplicate plugin name")));
+        let _ = std::fs::remove_dir_all(root);
     }
 }
