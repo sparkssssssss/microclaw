@@ -66,10 +66,6 @@ pub fn handle_gateway_cli(args: &[String]) -> Result<()> {
         "restart" => restart(),
         "status" => status(&args[1..]),
         "logs" => logs(args.get(1).map(|s| s.as_str())),
-        "help" | "--help" | "-h" => {
-            print_gateway_help();
-            Ok(())
-        }
         _ => Err(anyhow!(
             "Unknown gateway action: {}. Use: gateway <install|uninstall|start|stop|restart|status|logs>",
             action
@@ -85,14 +81,13 @@ USAGE:
     microclaw gateway <ACTION>
 
 ACTIONS:
-    install [--force]      Install and enable persistent gateway service
-    uninstall              Disable and remove persistent gateway service
-    start                  Start gateway service
-    stop                   Stop gateway service
-    restart                Restart gateway service
-    status [--json] [--deep]  Show gateway service status
-    logs [N]               Show last N lines of gateway logs (default: 200)
-    help                   Show this message
+    install [--force]           Install and enable persistent gateway service
+    uninstall                   Disable and remove persistent gateway service
+    start                       Start gateway service
+    stop                        Stop gateway service
+    restart                     Restart gateway service
+    status [--json] [--deep]    Show gateway service status
+    logs [N]                    Show last N lines of gateway logs (default: 200)
 "#
     );
 }

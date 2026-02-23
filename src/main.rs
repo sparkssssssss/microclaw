@@ -50,12 +50,12 @@ fn print_web_help() {
         r#"Manage Web UI Configurations
 
 Usage:
-  microclaw web [--password <value> | --password-generate | --password-clear]
+  microclaw web [password <value> | password-generate | password-clear]
 
 Options:
-  --password <value>      Set the exact new password (min 8 chars)
-  --password-generate     Generate a random password
-  --password-clear        Clear password hash and revoke sessions (test/reset)
+  password <value>      Set the exact new password (min 8 chars)
+  password-generate     Generate a random password
+  password-clear        Clear password hash and revoke sessions (test/reset)
 
 Notes:
   - Existing Web login sessions are revoked automatically.
@@ -83,7 +83,7 @@ fn handle_web_cli(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if args.len() == 1 && args[0] == "--password-clear" {
+    if args.len() == 1 && args[0] == "password-clear" {
         let config = Config::load()?;
         let runtime_data_dir = config.runtime_data_dir();
         let database = db::Database::new(&runtime_data_dir)?;
@@ -103,17 +103,17 @@ fn handle_web_cli(args: &[String]) -> anyhow::Result<()> {
     let mut i = 0usize;
     while i < args.len() {
         match args[i].as_str() {
-            "--password" => {
+            "password" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
-                    anyhow::bail!("missing value for --password");
+                    anyhow::bail!("missing value for password");
                 };
                 password_arg = Some(v.clone());
             }
-            "--password-generate" => {
+            "password-generate" => {
                 generate = true;
             }
-            "--password-clear" => {
+            "password-clear" => {
                 clear = true;
             }
             other => {
@@ -124,11 +124,11 @@ fn handle_web_cli(args: &[String]) -> anyhow::Result<()> {
     }
 
     if clear {
-        anyhow::bail!("use `microclaw web --password-clear` by itself");
+        anyhow::bail!("use `microclaw web password-clear` by itself");
     }
 
     if password_arg.is_some() && generate {
-        anyhow::bail!("use either --password or --password-generate, not both");
+        anyhow::bail!("use either password or password-generate, not both");
     }
 
     let generated = password_arg.is_none();
