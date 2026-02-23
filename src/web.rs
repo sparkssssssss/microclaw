@@ -2255,7 +2255,7 @@ mod tests {
         let limits = WebLimits {
             max_inflight_per_session: 2,
             max_requests_per_window: 1,
-            rate_window: Duration::from_millis(200),
+            rate_window: Duration::from_secs(2),
             run_history_limit: 128,
             session_idle_ttl: Duration::from_secs(60),
         };
@@ -2280,7 +2280,7 @@ mod tests {
         let resp2 = app.clone().oneshot(mk_req("r2")).await.unwrap();
         assert_eq!(resp2.status(), StatusCode::TOO_MANY_REQUESTS);
 
-        tokio::time::sleep(Duration::from_millis(260)).await;
+        tokio::time::sleep(Duration::from_millis(2200)).await;
         let resp3 = app.oneshot(mk_req("r3")).await.unwrap();
         assert_eq!(resp3.status(), StatusCode::OK);
     }

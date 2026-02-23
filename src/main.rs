@@ -18,15 +18,15 @@ Usage:
   microclaw <command>
 
 Commands:
-  start      Start runtime (enabled channels)
-  setup      Full-screen setup wizard (or `setup --enable-sandbox`)
-  doctor     Preflight diagnostics
-  web-password  Reset Web UI operator password
-  hooks      Manage runtime hooks (list/info/enable/disable)
-  skill      Manage ClawHub skills (search/install/list/inspect)
-  gateway    Manage service (install/start/stop/status/logs)
-  version    Show version
-  help       Show this help
+  start         Start runtime (enabled channels)
+  setup         Full-screen setup wizard (or `setup --enable-sandbox`)
+  doctor        Preflight diagnostics
+  gateway       Manage service (install/start/stop/status/logs)
+  skill         Manage ClawHub skills (search/install/list/inspect)
+  hooks         Manage runtime hooks (list/info/enable/disable)
+  web           Manage Web UI Configurations
+  version       Show version
+  help          Show this help
 
 Quick Start:
   1) microclaw setup
@@ -45,18 +45,17 @@ fn print_version() {
     println!("microclaw {VERSION}");
 }
 
-fn print_web_password_help() {
+fn print_web_help() {
     println!(
-        r#"Reset Web UI operator password
+        r#"Manage Web UI Configurations
 
 Usage:
-  microclaw web-password [--password <value> | --generate | --clear]
+  microclaw web [--password <value> | --generate | --clear]
 
 Options:
   --password <value>  Set the exact new password (min 8 chars)
-  --generate          Generate a random password (default when omitted)
+  --generate          Generate a random password
   --clear             Clear password hash and revoke sessions (test/reset)
-  -h, --help          Show this help
 
 Notes:
   - Existing Web login sessions are revoked automatically.
@@ -78,9 +77,9 @@ fn generate_password() -> String {
     format!("mc-{}-{}!", &rand[..6], &rand[6..12])
 }
 
-fn handle_web_password_cli(args: &[String]) -> anyhow::Result<()> {
-    if args.iter().any(|a| a == "-h" || a == "--help") {
-        print_web_password_help();
+fn handle_web_cli(args: &[String]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        print_web_help();
         return Ok(());
     }
 
@@ -118,14 +117,14 @@ fn handle_web_password_cli(args: &[String]) -> anyhow::Result<()> {
                 clear = true;
             }
             other => {
-                anyhow::bail!("unknown option for web-password: {other}");
+                anyhow::bail!("unknown option for web: {other}");
             }
         }
         i += 1;
     }
 
     if clear {
-        anyhow::bail!("use `microclaw web-password --clear` by itself");
+        anyhow::bail!("use `microclaw web --clear` by itself");
     }
 
     if password_arg.is_some() && generate {
@@ -377,8 +376,8 @@ async fn main() -> anyhow::Result<()> {
             doctor::run_cli(&args[2..])?;
             return Ok(());
         }
-        Some("web-password") => {
-            handle_web_password_cli(&args[2..])?;
+        Some("web") => {
+            handle_web_cli(&args[2..])?;
             return Ok(());
         }
         Some("skill") => {

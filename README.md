@@ -474,9 +474,10 @@ When `web_enabled: true`, MicroClaw serves a local Web UI (default `http://127.0
 - The first message in that session automatically persists it in SQLite
 - If no Web operator password exists, MicroClaw initializes a temporary default password `helloworld` and prompts you to change it after sign-in (you can skip temporarily)
 - Password reset helpers:
-  - `microclaw web-password --password <value>`
-  - `microclaw web-password --generate`
-  - `microclaw web-password --clear`
+  - `microclaw web` (show usage)
+  - `microclaw web --password <value>`
+  - `microclaw web --generate`
+  - `microclaw web --clear`
 
 ## Release
 
