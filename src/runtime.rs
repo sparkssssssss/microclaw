@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use tracing::info;
-#[cfg(feature = "sqlite-vec")]
-use tracing::warn;
 
 use crate::channels::dingtalk::{build_dingtalk_runtime_contexts, DingTalkRuntimeContext};
 use crate::channels::discord::{build_discord_runtime_contexts, DiscordRuntimeContext};
