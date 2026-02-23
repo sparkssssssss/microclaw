@@ -33,6 +33,7 @@ An agentic AI assistant for chat surfaces, inspired by [nanoclaw](https://github
 - [Tools](#tools)
 - [Memory](#memory)
 - [Skills](#skills)
+- [Plugins](#plugins)
 - [MCP](#mcp)
 - [Plan & Execute](#plan--execute)
 - [Scheduling](#scheduling)
@@ -299,6 +300,34 @@ Supported frontmatter fields:
 - `compatibility.os` / `compatibility.deps` (also supported)
 
 Unavailable skills are filtered automatically by platform/dependencies, so unsupported skills do not appear in `/skills`.
+
+## Plugins
+
+MicroClaw supports manifest-based plugins for:
+
+- Slash commands (for example `/uptime`, `/announce hello`)
+- Dynamic tools exposed to the agent loop
+- Per-turn context providers (prompt/document injections)
+
+Default plugins directory:
+
+- `<data_dir>/plugins`
+
+Optional override:
+
+```yaml
+plugins:
+  enabled: true
+  dir: "./microclaw.data/plugins"
+```
+
+Plugin admin commands (control chats):
+
+- `/plugins list`
+- `/plugins validate`
+- `/plugins reload`
+
+See full manifest schema and examples: `docs/plugins/overview.md`.
 
 **Commands:**
 - `/reset` -- clear current chat context (session + chat history)

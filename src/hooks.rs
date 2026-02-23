@@ -658,19 +658,43 @@ body
         let hooks_dir = root.join("hooks");
         let hook_dir = hooks_dir.join("block-bash");
         std::fs::create_dir_all(&hook_dir).unwrap();
+        #[cfg(windows)]
+        let hook_command = "hook.cmd";
+        #[cfg(not(windows))]
+        let hook_command = "sh hook.sh";
         std::fs::write(
             hook_dir.join("HOOK.md"),
-            r#"---
+            format!(
+                r#"---
 name: block-bash
 description: block bash
 events: [BeforeToolCall]
-command: "sh hook.sh"
+command: "{}"
 enabled: true
 timeout_ms: 2000
 ---
 "#,
+                hook_command
+            ),
         )
         .unwrap();
+        #[cfg(windows)]
+        std::fs::write(
+            hook_dir.join("hook.cmd"),
+            r#"@echo off
+setlocal enableextensions enabledelayedexpansion
+set payload=
+for /f "usebackq delims=" %%A in (`more`) do set payload=%%A
+echo !payload! | findstr /C:"\"tool_name\":\"bash\"" >nul
+if %errorlevel%==0 (
+  echo {"action":"block","reason":"bash blocked"}
+) else (
+  echo {"action":"allow"}
+)
+"#,
+        )
+        .unwrap();
+        #[cfg(not(windows))]
         std::fs::write(
             hook_dir.join("hook.sh"),
             r#"#!/bin/sh
