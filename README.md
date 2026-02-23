@@ -492,7 +492,7 @@ Publish both installer mode (GitHub Release asset used by `install.sh`) and Home
 
 ### 1. Create channel bot credentials
 
-Enable at least one channel: Telegram, Discord, Slack, Feishu/Lark, Matrix, WhatsApp, iMessage, Email, Nostr, Signal, DingTalk, QQ, IRC, or Web UI.
+Enable at least one channel, or use Web UI (enabled by default).
 
 Telegram (optional):
 1. Open Telegram and search for [@BotFather](https://t.me/BotFather)
@@ -791,7 +791,7 @@ Path compatibility policy:
 - If `data_dir` / `skills_dir` / `working_dir` are already configured, MicroClaw keeps using those configured paths.
 - If these fields are not configured, defaults are `data_dir=~/.microclaw`, `skills_dir=<data_dir>/skills`, `working_dir=~/.microclaw/working_dir`.
 
-`*` At least one channel must be enabled: legacy channel token fields (`telegram_bot_token`, `discord_bot_token`) or account tokens under `channels.<name>.accounts.<id>`, or IRC fields under `channels.irc`, or `web_enabled: true`.
+`*` At least one channel configuration must be enabled; `web_enabled` is on by default.
 
 ### OpenAI-compatible body overrides
 
