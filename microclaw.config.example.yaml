@@ -71,12 +71,6 @@ compact_keep_recent: 20
 # Set true to allow slash commands without mention in those contexts.
 # allow_group_slash_without_mention: false
 
-# WhatsApp Cloud API (optional)
-# whatsapp_access_token: ""
-# whatsapp_phone_number_id: ""
-# whatsapp_verify_token: ""
-# whatsapp_webhook_port: 8080
-
 channels:
   web:
     enabled: true
@@ -145,13 +139,6 @@ web_run_history_limit: 512
 # Idle cleanup TTL for web session quota/locks (seconds)
 web_session_idle_ttl_seconds: 300
 
-# Legacy flat channel fields (backward compatibility only; prefer `channels:` above):
-# telegram_bot_token: ""
-# bot_username: ""
-# discord_bot_token: null
-# discord_allowed_channels: []
-# web_enabled: true
-
 # Soul file: defines your bot's personality, voice, values, and behavior.
 # Supports markdown format. If not set, checks data_dir/SOUL.md then ./SOUL.md.
 # Per-chat overrides: place SOUL.md in <data_dir>/runtime/groups/<chat_id>/SOUL.md
@@ -161,4 +148,4 @@ web_session_idle_ttl_seconds: 300
 # Place plugin manifests in <data_dir>/plugins by default (or set a custom dir below).
 # plugins:
 #   enabled: true
-#   dir: "./microclaw.data/plugins"
+#   dir: "~/microclaw.data/plugins"
