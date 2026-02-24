@@ -67,6 +67,9 @@ compact_keep_recent: 20
 # Control chats can operate across chats (send_message/schedule/memory global/export/todo).
 # Non-control chats are restricted to their own chat_id.
 # control_chat_ids: []
+# In group/server/channel chats, slash commands require @mention by default.
+# Set true to allow slash commands without mention in those contexts.
+# allow_group_slash_without_mention: false
 
 # WhatsApp Cloud API (optional)
 # whatsapp_access_token: ""

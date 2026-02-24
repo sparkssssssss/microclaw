@@ -285,6 +285,12 @@ MicroClaw 支持 [Anthropic Agent Skills](https://github.com/anthropics/skills) 
 - `/status` -- 查看 provider/model 和当前聊天会话/任务状态
 - `/model` -- 查看当前 provider/model（`/model <name>` 目前会提示暂不支持切换）
 
+命令处理规则：
+- 以 `/` 开头的输入会被识别为命令。
+- 支持“前置提及 + slash”形式（例如 `@bot /status`、`<@U123> /status`）。
+- slash 命令不会写入 agent 会话上下文。
+- 未知 slash 命令返回 `Unknown command.`。
+
 ## MCP
 
 MicroClaw 支持从以下位置加载 MCP 配置并合并：
@@ -589,6 +595,7 @@ microclaw gateway uninstall
 | `channels.slack.accounts.<id>.model` | 否 | 未设置 | Slack 某个 bot 账号的模型覆盖（按 bot 生效） |
 | `channels.feishu.accounts.<id>.model` | 否 | 未设置 | 飞书/Lark 某个 bot 账号的模型覆盖（按 bot 生效） |
 | `channels.irc.model` | 否 | 未设置 | IRC bot 的模型覆盖 |
+| `allow_group_slash_without_mention` | 否 | `false` | 为 `true` 时，群/频道中的 slash 命令可不提及机器人直接执行 |
 | `model_prices` | 否 | `[]` | 可选模型价格表（每百万 token 的美元单价），用于 `/usage` 成本估算 |
 | `llm_base_url` | 否 | provider 预设默认值 | 自定义 API 基础地址 |
 | `data_dir` | 否 | `~/.microclaw` | 数据根目录（运行时数据在 `data_dir/runtime`，技能在 `data_dir/skills`） |
@@ -689,6 +696,7 @@ microclaw start
 - 飞书/Lark 群聊：被 @ 提及时回复；可通过 `allowed_chats` 限定
 - IRC 私聊：每条消息都会回复
 - IRC 频道：默认被提及时回复；可通过 `channels.irc.mention_required` 配置
+- 群/频道中的 slash 命令默认也需要提及；可通过 `allow_group_slash_without_mention: true` 放开
 
 **追赶行为（Telegram 群）：** 被 @ 时，机器人会加载该群上次回复以来的所有消息（而不是仅最近 N 条），使群聊交互更具上下文。
 

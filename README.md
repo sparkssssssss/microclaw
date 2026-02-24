@@ -340,6 +340,7 @@ See full manifest schema and examples: `docs/plugins/overview.md`.
 
 Command handling rules:
 - Any input starting with `/` is treated as a command.
+- Inputs with leading mentions before slash are also treated as commands (for example `@bot /status`, `<@U123> /status`).
 - Slash commands do **not** enter agent conversation history/session context.
 - Unknown slash commands return `Unknown command.`.
 
@@ -779,6 +780,7 @@ All configuration is via `microclaw.config.yaml`:
 | `channels.discord.accounts.<id>.allowed_channels` | No | `[]` | Optional Discord channel allowlist scoped to one account |
 | `channels.discord.accounts.<id>.no_mention` | No | `false` | If true, that Discord account responds in guild channels without @mention |
 | `channels.discord.accounts.<id>.model` | No | unset | Optional per-bot model override for that Discord account |
+| `allow_group_slash_without_mention` | No | `false` | If true, allow slash commands in group/server/channel chats without @mention |
 | `discord_allowed_channels` | No | `[]` | Discord channel ID allowlist; empty means no channel restriction |
 | `api_key` | Yes* | -- | LLM API key (`ollama` can leave this empty; `openai-codex` supports OAuth or `api_key`) |
 | `bot_username` | No | -- | Telegram bot username (without @; needed for Telegram group mentions) |
@@ -932,6 +934,7 @@ Notes:
 - Feishu/Lark groups: respond on @mention; optionally constrained by `allowed_chats`.
 - IRC private messages: respond to every message.
 - IRC channels: by default respond on mention; configurable via `channels.irc.mention_required`.
+- Group/server/channel slash commands are mention-gated by default; set `allow_group_slash_without_mention: true` to restore permissive behavior.
 
 **Catch-up behavior (Telegram groups):** When mentioned in a group, the bot loads all messages since its last reply in that group (instead of just the last N messages). This means it catches up on everything it missed, making group interactions much more contextual.
 
