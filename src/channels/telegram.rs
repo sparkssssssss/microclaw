@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -36,6 +37,67 @@ pub struct TelegramAccountConfig {
 
 fn default_enabled() -> bool {
     true
+}
+
+const DUPLICATE_FINGERPRINT_WINDOW: Duration = Duration::from_secs(12);
+const DUPLICATE_FINGERPRINT_CACHE_TTL: Duration = Duration::from_secs(60);
+
+static RECENT_INBOUND_FINGERPRINTS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+fn inbound_fingerprint_cache() -> &'static Mutex<HashMap<String, Instant>> {
+    RECENT_INBOUND_FINGERPRINTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn build_inbound_fingerprint(
+    channel_name: &str,
+    raw_chat_id: i64,
+    sender_user_id: Option<i64>,
+    msg: &teloxide::types::Message,
+) -> Option<String> {
+    let mut parts = vec![format!("ch={channel_name}"), format!("chat={raw_chat_id}")];
+    if let Some(uid) = sender_user_id {
+        parts.push(format!("uid={uid}"));
+    }
+    if let Some(text) = msg.text().map(str::trim).filter(|v| !v.is_empty()) {
+        parts.push(format!("t={}", text.chars().take(200).collect::<String>()));
+    }
+    if let Some(caption) = msg.caption().map(str::trim).filter(|v| !v.is_empty()) {
+        parts.push(format!("c={}", caption.chars().take(200).collect::<String>()));
+    }
+    if let Some(group_id) = msg.media_group_id() {
+        parts.push(format!("mg={}", group_id.0));
+    }
+    if let Some(photos) = msg.photo() {
+        if let Some(photo) = photos.last() {
+            parts.push(format!("p={}", photo.file.unique_id.0));
+        }
+    }
+    if let Some(document) = msg.document() {
+        parts.push(format!("d={}", document.file.unique_id.0));
+    }
+    if let Some(voice) = msg.voice() {
+        parts.push(format!("v={}", voice.file.unique_id.0));
+    }
+
+    if parts.len() <= 2 {
+        return None;
+    }
+    Some(parts.join("|"))
+}
+
+fn is_recent_duplicate_fingerprint(fingerprint: &str) -> bool {
+    let now = Instant::now();
+    let Ok(mut cache) = inbound_fingerprint_cache().lock() else {
+        return false;
+    };
+    cache.retain(|_, seen_at| now.duration_since(*seen_at) <= DUPLICATE_FINGERPRINT_CACHE_TTL);
+    if let Some(previous_seen) = cache.get(fingerprint) {
+        if now.duration_since(*previous_seen) <= DUPLICATE_FINGERPRINT_WINDOW {
+            return true;
+        }
+    }
+    cache.insert(fingerprint.to_string(), now);
+    false
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -420,6 +482,18 @@ async fn handle_message(
         return Ok(());
     }
 
+    if let Some(fingerprint) =
+        build_inbound_fingerprint(&tg_channel_name, raw_chat_id, sender_user_id, &msg)
+    {
+        if is_recent_duplicate_fingerprint(&fingerprint) {
+            info!(
+                "Skipping recent duplicate Telegram payload: channel={}, raw_chat_id={}",
+                tg_channel_name, raw_chat_id
+            );
+            return Ok(());
+        }
+    }
+
     // Extract content: text, photo, or voice
     let mut text = msg.text().unwrap_or("").to_string();
     let mut image_data: Option<(String, String)> = None; // (base64, media_type)
@@ -692,6 +766,21 @@ async fn handle_message(
     .await
     .unwrap_or(raw_chat_id);
 
+    let inbound_message_id = msg.id.0.to_string();
+    let already_seen = call_blocking(state.db.clone(), {
+        let inbound_message_id = inbound_message_id.clone();
+        move |db| db.message_exists(chat_id, &inbound_message_id)
+    })
+    .await
+    .unwrap_or(false);
+    if already_seen {
+        info!(
+            "Skipping duplicate Telegram message: chat_id={}, message_id={}",
+            chat_id, inbound_message_id
+        );
+        return Ok(());
+    }
+
     // Store the chat and message
     let chat_title_owned = chat_title.clone();
     let chat_type_owned = db_chat_type.to_string();
@@ -719,7 +808,7 @@ async fn handle_message(
         text.clone()
     };
     let stored = StoredMessage {
-        id: msg.id.0.to_string(),
+        id: inbound_message_id,
         chat_id,
         sender_name: sender_name.clone(),
         content: stored_content,
@@ -787,7 +876,19 @@ async fn handle_message(
                 }
             }
 
-            if !response.is_empty() {
+            if used_send_message_tool {
+                if !response.is_empty() {
+                    info!(
+                        "Suppressing final response for chat {} because send_message already delivered output",
+                        chat_id
+                    );
+                } else {
+                    info!(
+                        "Agent returned empty final response for chat {}; likely delivered via send_message tool",
+                        chat_id
+                    );
+                }
+            } else if !response.is_empty() {
                 send_response(&bot, msg.chat.id, &response, msg.thread_id).await;
 
                 // Store bot response
@@ -801,13 +902,7 @@ async fn handle_message(
                 };
                 let _ = call_blocking(state.db.clone(), move |db| db.store_message(&bot_msg)).await;
             }
-            // If response is empty, agent likely delivered via send_message tool directly.
-            else if used_send_message_tool {
-                info!(
-                    "Agent returned empty final response for chat {}; likely delivered via send_message tool",
-                    chat_id
-                );
-            } else {
+            else {
                 let fallback = "I couldn't produce a visible reply after an automatic retry. Please try again.".to_string();
                 send_response(&bot, msg.chat.id, &fallback, msg.thread_id).await;
                 let bot_msg = StoredMessage {
