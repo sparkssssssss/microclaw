@@ -1832,7 +1832,7 @@ fn resolve_openai_compat_validation_base(
     base_url: &str,
     preset: Option<&ProviderPreset>,
 ) -> String {
-    let trimmed = if base_url.is_empty() {
+    let resolved = if base_url.is_empty() {
         preset
             .map(|p| p.default_base_url)
             .filter(|s| !s.is_empty())
@@ -1850,11 +1850,7 @@ fn resolve_openai_compat_validation_base(
         return "https://chatgpt.com/backend-api/codex".to_string();
     }
 
-    if trimmed.ends_with("/v1") {
-        trimmed
-    } else {
-        format!("{}/v1", trimmed)
-    }
+    resolved
 }
 
 fn mask_secret(s: &str) -> String {
@@ -2983,7 +2979,14 @@ sandbox:
     #[test]
     fn test_resolve_openai_compat_validation_base_openai() {
         let base = resolve_openai_compat_validation_base("openai", "https://api.openai.com", None);
-        assert_eq!(base, "https://api.openai.com/v1");
+        assert_eq!(base, "https://api.openai.com");
+    }
+
+    #[test]
+    fn test_resolve_openai_compat_validation_base_keeps_non_v1_prefix() {
+        let preset = find_provider_preset("zhipu");
+        let base = resolve_openai_compat_validation_base("zhipu", "", preset);
+        assert_eq!(base, "https://open.bigmodel.cn/api/paas/v4");
     }
 
     #[test]
