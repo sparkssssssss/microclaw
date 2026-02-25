@@ -797,6 +797,8 @@ All configuration is via `microclaw.config.yaml`:
 | `working_dir` | No | `~/.microclaw/working_dir` | Default working directory for tool operations; relative paths in `bash/read_file/write_file/edit_file/glob/grep` resolve from here |
 | `working_dir_isolation` | No | `chat` | Working directory isolation mode for `bash/read_file/write_file/edit_file/glob/grep`: `shared` uses `working_dir/shared`, `chat` isolates each chat under `working_dir/chat/<channel>/<chat_id>` |
 | `sandbox.mode` | No | `off` | Container sandbox mode for bash tool execution: `off` runs on host; `all` routes bash commands into docker containers |
+| `sandbox.security_profile` | No | `hardened` | Sandbox privilege profile: `hardened` (`--cap-drop ALL --security-opt no-new-privileges`), `standard` (Docker default caps), `privileged` (`--privileged`) |
+| `sandbox.cap_add` | No | `[]` | Optional extra Linux capabilities to add (`--cap-add`); applies to `hardened` and `standard` profiles |
 | `sandbox.mount_allowlist_path` | No | unset | Optional external mount allowlist file (one allowed root path per line) |
 | `max_tokens` | No | `8192` | Max tokens per model response |
 | `max_tool_iterations` | No | `100` | Max tool-use loop iterations per message |
@@ -891,6 +893,9 @@ Or configure manually:
 sandbox:
   mode: "all"
   backend: "auto"
+  security_profile: "hardened" # optional; hardened|standard|privileged, default hardened
+  # optional capability overrides (applies to hardened/standard)
+  # cap_add: ["SETUID", "SETGID", "CHOWN"]
   image: "ubuntu:25.10"
   container_prefix: "microclaw-sandbox"
   no_network: true
@@ -913,6 +918,11 @@ Then ask the agent to run:
 
 Notes:
 - `sandbox.mode: "off"` (default) means `bash` runs on host.
+- `sandbox.security_profile` defaults to `hardened` (same behavior as old hardcoded settings):
+  - `hardened`: `--cap-drop ALL --security-opt no-new-privileges`
+  - `standard`: Docker default capabilities (useful for `apt/chown/su` in sandbox)
+  - `privileged`: full container privilege (`--privileged`), debugging only
+- `sandbox.cap_add` appends `--cap-add` entries for `hardened` and `standard`.
 - If `mode: "all"` and Docker is unavailable:
   - `require_runtime: false` -> fallback to host with warning.
   - `require_runtime: true` -> command fails fast.

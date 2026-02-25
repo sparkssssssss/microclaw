@@ -11,6 +11,11 @@
 - Runtime: Docker backend (`auto` / `docker`).
 - Enable quickly: `microclaw setup --enable-sandbox`.
 - Verify readiness: `microclaw doctor sandbox`.
+- Security profile (`sandbox.security_profile`) controls capability posture:
+  - `hardened` (default): `--cap-drop ALL --security-opt no-new-privileges`
+  - `standard`: Docker default capabilities
+  - `privileged`: `--privileged` (debugging only)
+- Optional capability overrides via `sandbox.cap_add` for `hardened` / `standard`.
 - If sandbox is enabled but runtime is unavailable:
   - `require_runtime = true`: fail closed.
   - `require_runtime = false`: warn and fall back to host execution.
