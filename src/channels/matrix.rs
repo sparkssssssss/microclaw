@@ -22,6 +22,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::agent_engine::process_with_agent_with_events;
+use crate::agent_engine::should_suppress_user_error;
 use crate::agent_engine::AgentEvent;
 use crate::agent_engine::AgentRequestContext;
 use crate::channels::startup_guard::{mark_channel_started, should_drop_pre_start_message};
@@ -1884,13 +1885,15 @@ async fn handle_matrix_message(
         }
         Err(e) => {
             error!("Error processing Matrix message: {e}");
-            let _ = send_matrix_text_runtime(
-                &runtime,
-                &msg.room_id,
-                &format!("Error: {e}"),
-                msg.prefer_sdk_send,
-            )
-            .await;
+            if !should_suppress_user_error(&e) {
+                let _ = send_matrix_text_runtime(
+                    &runtime,
+                    &msg.room_id,
+                    &format!("Error: {e}"),
+                    msg.prefer_sdk_send,
+                )
+                .await;
+            }
         }
     }
 }

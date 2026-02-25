@@ -8,7 +8,9 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatAction, InputFile, ParseMode, ThreadId};
 use tracing::{error, info, warn};
 
-use crate::agent_engine::{process_with_agent_with_events, AgentEvent, AgentRequestContext};
+use crate::agent_engine::{
+    process_with_agent_with_events, should_suppress_user_error, AgentEvent, AgentRequestContext,
+};
 use crate::channels::startup_guard::{mark_channel_started, should_drop_pre_start_message};
 use crate::chat_commands::maybe_handle_plugin_command;
 use crate::chat_commands::{handle_chat_command, is_slash_command, unknown_command_response};
@@ -855,11 +857,13 @@ async fn handle_message(
         Err(e) => {
             typing_handle.abort();
             error!("Error processing message: {}", e);
-            let mut req = bot.send_message(msg.chat.id, format!("Error: {e}"));
-            if let Some(tid) = msg.thread_id {
-                req = req.message_thread_id(tid);
+            if !should_suppress_user_error(&e) {
+                let mut req = bot.send_message(msg.chat.id, format!("Error: {e}"));
+                if let Some(tid) = msg.thread_id {
+                    req = req.message_thread_id(tid);
+                }
+                let _ = req.await;
             }
-            let _ = req.await;
         }
     }
 

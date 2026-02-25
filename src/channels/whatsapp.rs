@@ -8,7 +8,7 @@ use serde::Deserialize;
 use tracing::{error, info};
 
 use crate::agent_engine::process_with_agent_with_events;
-use crate::agent_engine::{AgentEvent, AgentRequestContext};
+use crate::agent_engine::{should_suppress_user_error, AgentEvent, AgentRequestContext};
 use crate::channels::startup_guard::{
     mark_channel_started, parse_epoch_ms_from_seconds_str, should_drop_pre_start_message,
 };
@@ -731,15 +731,17 @@ async fn handle_whatsapp_message(
         }
         Err(e) => {
             error!("WhatsApp: error processing message: {e}");
-            let _ = send_whatsapp_text(
-                &reqwest::Client::new(),
-                &runtime.access_token,
-                &runtime.phone_number_id,
-                &runtime.api_version,
-                external_chat_id,
-                &format!("Error: {e}"),
-            )
-            .await;
+            if !should_suppress_user_error(&e) {
+                let _ = send_whatsapp_text(
+                    &reqwest::Client::new(),
+                    &runtime.access_token,
+                    &runtime.phone_number_id,
+                    &runtime.api_version,
+                    external_chat_id,
+                    &format!("Error: {e}"),
+                )
+                .await;
+            }
         }
     }
 }

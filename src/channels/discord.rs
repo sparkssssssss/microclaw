@@ -13,6 +13,7 @@ use serenity::prelude::*;
 use tracing::{error, info, warn};
 
 use crate::agent_engine::process_with_agent_with_events;
+use crate::agent_engine::should_suppress_user_error;
 use crate::agent_engine::AgentEvent;
 use crate::agent_engine::AgentRequestContext;
 use crate::channels::startup_guard::{mark_channel_started, should_drop_pre_start_message};
@@ -556,7 +557,9 @@ impl EventHandler for Handler {
             Err(e) => {
                 drop(typing);
                 error!("Error processing Discord message: {e}");
-                let _ = msg.channel_id.say(&ctx.http, format!("Error: {e}")).await;
+                if !should_suppress_user_error(&e) {
+                    let _ = msg.channel_id.say(&ctx.http, format!("Error: {e}")).await;
+                }
             }
         }
     }

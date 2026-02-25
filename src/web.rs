@@ -1505,11 +1505,11 @@ async fn handle_web_slash_command(state: &WebState, text: &str, chat_id: i64) ->
     }
 
     if trimmed == "/stop" {
-        let _ = call_blocking(state.app_state.db.clone(), move |db| {
-            db.clear_chat_context(chat_id)
-        })
-        .await;
-        return Some("Context cleared (session + chat history).".to_string());
+        let stopped = crate::run_control::abort_runs("web", chat_id).await;
+        if stopped > 0 {
+            return Some(format!("Stopping current run ({stopped} active)."));
+        }
+        return Some("No active run in this chat.".to_string());
     }
 
     if trimmed == "/skills" {

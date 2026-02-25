@@ -8,6 +8,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{error, info, warn};
 
 use crate::agent_engine::process_with_agent_with_events;
+use crate::agent_engine::should_suppress_user_error;
 use crate::agent_engine::AgentEvent;
 use crate::agent_engine::AgentRequestContext;
 use crate::channels::startup_guard::{
@@ -801,7 +802,9 @@ async fn handle_slack_message(
         }
         Err(e) => {
             error!("Error processing Slack message: {e}");
-            let _ = send_slack_response(bot_token, channel, &format!("Error: {e}")).await;
+            if !should_suppress_user_error(&e) {
+                let _ = send_slack_response(bot_token, channel, &format!("Error: {e}")).await;
+            }
         }
     }
 }
