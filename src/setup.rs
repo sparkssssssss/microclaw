@@ -2291,9 +2291,16 @@ impl SetupApp {
     }
 
     fn field_display_order(key: &str) -> usize {
+        const ORDER_MODEL_BASE: usize = 0;
+        const ORDER_CHANNEL_BASE: usize = 100;
+        const ORDER_APP_BASE: usize = 20_000;
+        const ORDER_MEMORY_BASE: usize = 21_000;
+        const ORDER_EMBED_BASE: usize = 22_000;
+        const ORDER_SANDBOX_BASE: usize = 23_000;
+
         if key.starts_with("DYN_") {
             for (ch_idx, ch) in DYNAMIC_CHANNELS.iter().enumerate() {
-                let channel_base = 300 + ch_idx * 1000;
+                let channel_base = ORDER_CHANNEL_BASE + 2_000 + ch_idx * 1_000;
                 if key == dynamic_bot_count_field_key(ch.name) {
                     return channel_base;
                 }
@@ -2327,24 +2334,24 @@ impl SetupApp {
         }
         match key {
             // 1) Model
-            "LLM_PROVIDER" => 0,
-            "LLM_API_KEY" => 1,
-            "LLM_MODEL" => 2,
-            "LLM_BASE_URL" => 3,
-            // 2) Channel (dynamic channel fields start at 20 via branch above)
-            "ENABLED_CHANNELS" => 10,
-            "TELEGRAM_BOT_TOKEN" => 11,
-            "BOT_USERNAME" => 12,
-            "TELEGRAM_ACCOUNT_ID" => 13,
-            "TELEGRAM_MODEL" => 14,
-            _ if key == telegram_bot_count_key() => 15,
-            "DISCORD_BOT_TOKEN" => 17,
-            "DISCORD_ACCOUNT_ID" => 18,
-            "DISCORD_MODEL" => 19,
-            "DISCORD_ACCOUNTS_JSON" => 20,
+            "LLM_PROVIDER" => ORDER_MODEL_BASE,
+            "LLM_API_KEY" => ORDER_MODEL_BASE + 1,
+            "LLM_MODEL" => ORDER_MODEL_BASE + 2,
+            "LLM_BASE_URL" => ORDER_MODEL_BASE + 3,
+            // 2) Channel (dynamic channel fields are placed in the branch above)
+            "ENABLED_CHANNELS" => ORDER_CHANNEL_BASE,
+            "TELEGRAM_BOT_TOKEN" => ORDER_CHANNEL_BASE + 1,
+            "BOT_USERNAME" => ORDER_CHANNEL_BASE + 2,
+            "TELEGRAM_ACCOUNT_ID" => ORDER_CHANNEL_BASE + 3,
+            "TELEGRAM_MODEL" => ORDER_CHANNEL_BASE + 4,
+            _ if key == telegram_bot_count_key() => ORDER_CHANNEL_BASE + 5,
+            "DISCORD_BOT_TOKEN" => ORDER_CHANNEL_BASE + 900,
+            "DISCORD_ACCOUNT_ID" => ORDER_CHANNEL_BASE + 901,
+            "DISCORD_MODEL" => ORDER_CHANNEL_BASE + 902,
+            "DISCORD_ACCOUNTS_JSON" => ORDER_CHANNEL_BASE + 903,
             _ if key.starts_with("TELEGRAM_BOT") => {
                 for slot in 1..=MAX_BOT_SLOTS {
-                    let base = 20 + (slot * 5);
+                    let base = ORDER_CHANNEL_BASE + 100 + (slot * 10);
                     if key == telegram_slot_id_key(slot) {
                         return base + 1;
                     }
@@ -2364,21 +2371,21 @@ impl SetupApp {
                 usize::MAX
             }
             // 3) App
-            "DATA_DIR" => 40,
-            "TIMEZONE" => 41,
-            "WORKING_DIR" => 42,
+            "DATA_DIR" => ORDER_APP_BASE,
+            "TIMEZONE" => ORDER_APP_BASE + 1,
+            "WORKING_DIR" => ORDER_APP_BASE + 2,
             // 4) Memory
-            "REFLECTOR_ENABLED" => 50,
-            "REFLECTOR_INTERVAL_MINS" => 51,
-            "MEMORY_TOKEN_BUDGET" => 52,
+            "REFLECTOR_ENABLED" => ORDER_MEMORY_BASE,
+            "REFLECTOR_INTERVAL_MINS" => ORDER_MEMORY_BASE + 1,
+            "MEMORY_TOKEN_BUDGET" => ORDER_MEMORY_BASE + 2,
             // 5) Embedding
-            "EMBEDDING_PROVIDER" => 60,
-            "EMBEDDING_API_KEY" => 61,
-            "EMBEDDING_BASE_URL" => 62,
-            "EMBEDDING_MODEL" => 63,
-            "EMBEDDING_DIM" => 64,
+            "EMBEDDING_PROVIDER" => ORDER_EMBED_BASE,
+            "EMBEDDING_API_KEY" => ORDER_EMBED_BASE + 1,
+            "EMBEDDING_BASE_URL" => ORDER_EMBED_BASE + 2,
+            "EMBEDDING_MODEL" => ORDER_EMBED_BASE + 3,
+            "EMBEDDING_DIM" => ORDER_EMBED_BASE + 4,
             // 6) Sandbox (last)
-            "SANDBOX_ENABLED" => 100,
+            "SANDBOX_ENABLED" => ORDER_SANDBOX_BASE,
             _ => usize::MAX,
         }
     }
