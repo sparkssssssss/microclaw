@@ -610,7 +610,7 @@ The `config` flow provides:
 - Provider selection + model selection (numbered choices with custom override)
 - Better Ollama UX: local model auto-detection + sensible local defaults
 - Channel credentials are written in multi-account form by default (`channels.<channel>.default_account` + `channels.<channel>.accounts.main`)
-- Safe `microclaw.config.yaml` save with automatic backup
+- Safe `microclaw.config.yaml` save with automatic backup in `microclaw.config.backups/` (keeps latest 50)
 - Auto-created directories for `data_dir` and `working_dir`
 
 If you prefer the full-screen TUI, you can still run:
