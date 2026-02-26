@@ -926,6 +926,17 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
+                    key: "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED".into(),
+                    label: "Require explicit user confirmation for high-risk tools (true/false)"
+                        .into(),
+                    value: existing
+                        .get("HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED")
+                        .cloned()
+                        .unwrap_or_else(|| "true".into()),
+                    required: false,
+                    secret: false,
+                },
+                Field {
                     key: "REFLECTOR_ENABLED".into(),
                     label: "Memory reflector enabled (true/false)".into(),
                     value: existing
@@ -1695,6 +1706,10 @@ impl SetupApp {
                     map.insert(
                         "SANDBOX_ENABLED".into(),
                         (config.sandbox.mode == crate::config::SandboxMode::All).to_string(),
+                    );
+                    map.insert(
+                        "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED".into(),
+                        config.high_risk_tool_user_confirmation_required.to_string(),
                     );
                     map.insert(
                         "REFLECTOR_ENABLED".into(),
@@ -2589,6 +2604,17 @@ impl SetupApp {
                 ));
             }
         }
+        let high_risk_confirm = self.field_value("HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED");
+        if !high_risk_confirm.is_empty() {
+            let lower = high_risk_confirm.to_ascii_lowercase();
+            let valid = matches!(lower.as_str(), "true" | "false" | "1" | "0" | "yes" | "no");
+            if !valid {
+                return Err(MicroClawError::Config(
+                    "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED must be true/false (or 1/0)"
+                        .into(),
+                ));
+            }
+        }
 
         let memory_token_budget_raw = self.field_value("MEMORY_TOKEN_BUDGET");
         if !memory_token_budget_raw.is_empty() {
@@ -2945,6 +2971,7 @@ impl SetupApp {
             "TIMEZONE" => "UTC".into(),
             "WORKING_DIR" => default_working_dir_for_setup(),
             "SANDBOX_ENABLED" => "false".into(),
+            "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED" => "true".into(),
             "REFLECTOR_ENABLED" => "true".into(),
             "REFLECTOR_INTERVAL_MINS" => "15".into(),
             "MEMORY_TOKEN_BUDGET" => "1500".into(),
@@ -3009,7 +3036,7 @@ impl SetupApp {
         }
         match key {
             "DATA_DIR" | "TIMEZONE" | "WORKING_DIR" => "App",
-            "SANDBOX_ENABLED" => "Sandbox",
+            "SANDBOX_ENABLED" | "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED" => "Sandbox",
             "REFLECTOR_ENABLED" | "REFLECTOR_INTERVAL_MINS" | "MEMORY_TOKEN_BUDGET" => "Memory",
             "LLM_PROVIDER" | "LLM_API_KEY" | "LLM_MODEL" | "LLM_BASE_URL" => "Model",
             "EMBEDDING_PROVIDER" | "EMBEDDING_API_KEY" | "EMBEDDING_BASE_URL"
@@ -3151,6 +3178,7 @@ impl SetupApp {
             "EMBEDDING_DIM" => ORDER_EMBED_BASE + 4,
             // 6) Sandbox (last)
             "SANDBOX_ENABLED" => ORDER_SANDBOX_BASE,
+            "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED" => ORDER_SANDBOX_BASE + 1,
             _ => usize::MAX,
         }
     }
@@ -3956,7 +3984,17 @@ fn save_config_yaml(
         .cloned()
         .unwrap_or_else(default_working_dir_for_setup);
     yaml.push_str(&format!("working_dir: \"{}\"\n", working_dir));
-    yaml.push_str("high_risk_tool_user_confirmation_required: true\n");
+    let high_risk_confirm_required = values
+        .get("HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED")
+        .map(|v| {
+            let lower = v.trim().to_ascii_lowercase();
+            lower != "false" && lower != "0" && lower != "no"
+        })
+        .unwrap_or(true);
+    yaml.push_str(&format!(
+        "high_risk_tool_user_confirmation_required: {}\n",
+        high_risk_confirm_required
+    ));
     let sandbox_enabled = values
         .get("SANDBOX_ENABLED")
         .map(|v| {
@@ -4892,6 +4930,7 @@ mod tests {
         assert!(s.contains("    enabled: true\n"));
         assert!(s.contains("llm_provider: \"anthropic\""));
         assert!(s.contains("api_key: \"key\""));
+        assert!(s.contains("high_risk_tool_user_confirmation_required: true\n"));
         assert!(s.contains("sandbox:\n"));
         assert!(s.contains("  mode: \"all\"\n"));
 
@@ -4905,6 +4944,29 @@ mod tests {
         let _ = fs::remove_file(&yaml_path);
         let _ = fs::remove_file(&backup2_path);
         let _ = fs::remove_dir(config_backup_dir_for(&yaml_path));
+    }
+
+    #[test]
+    fn test_save_config_yaml_respects_high_risk_confirmation_toggle() {
+        let yaml_path = std::env::temp_dir().join(format!(
+            "microclaw_setup_high_risk_confirm_test_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+
+        let mut values = HashMap::new();
+        values.insert("ENABLED_CHANNELS".into(), "web".into());
+        values.insert("LLM_PROVIDER".into(), "anthropic".into());
+        values.insert("LLM_API_KEY".into(), "key".into());
+        values.insert(
+            "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED".into(),
+            "false".into(),
+        );
+
+        save_config_yaml(&yaml_path, &values).unwrap();
+        let s = fs::read_to_string(&yaml_path).unwrap();
+        assert!(s.contains("high_risk_tool_user_confirmation_required: false\n"));
+
+        let _ = fs::remove_file(&yaml_path);
     }
 
     #[test]

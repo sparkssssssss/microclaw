@@ -582,6 +582,9 @@ html:not(.dark) .mc-msg-time {
 .mc-think-details > summary {
   cursor: pointer;
   list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 7px 10px;
   font-size: 12px;
   font-weight: 600;
@@ -601,6 +604,15 @@ html:not(.dark) .mc-msg-time {
 
 .mc-think-details[open] > summary::before {
   content: "▾";
+}
+
+.mc-think-summary-icon {
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  border: 1.5px solid color-mix(in srgb, var(--mc-accent) 52%, #6b7280);
+  border-top-color: color-mix(in srgb, var(--mc-accent) 92%, #f8fafc);
+  animation: mc-spin 0.9s linear infinite;
 }
 
 .mc-think-content {
@@ -671,6 +683,15 @@ html:not(.dark) .mc-think-content {
   40% {
     transform: translateY(-2px);
     opacity: 0.95;
+  }
+}
+
+@keyframes mc-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
   }
 }
 

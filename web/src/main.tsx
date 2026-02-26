@@ -248,6 +248,7 @@ const MODEL_OPTIONS: Record<string, string[]> = {
 const DEFAULT_CONFIG_VALUES = {
   llm_provider: 'anthropic',
   working_dir_isolation: 'chat',
+  high_risk_tool_user_confirmation_required: true,
   max_tokens: 8192,
   max_tool_iterations: 100,
   max_document_size_mb: 100,
@@ -929,8 +930,11 @@ function CustomAssistantMessage() {
         </div>
       )}
       {thinkText.trim() ? (
-        <details className="mc-think-details">
-          <summary>View thinking</summary>
+        <details className="mc-think-details" open>
+          <summary>
+            <span className="mc-think-summary-icon" aria-hidden="true" />
+            <span>Thinking & Processing ...</span>
+          </summary>
           <pre className="mc-think-content">{thinkText}</pre>
         </details>
       ) : null}
@@ -1837,6 +1841,7 @@ function App() {
         working_dir_isolation: normalizeWorkingDirIsolation(
           data.config?.working_dir_isolation || DEFAULT_CONFIG_VALUES.working_dir_isolation,
         ),
+        high_risk_tool_user_confirmation_required: data.config?.high_risk_tool_user_confirmation_required !== false,
         max_tokens: Number(data.config?.max_tokens ?? 8192),
         max_tool_iterations: Number(data.config?.max_tool_iterations ?? 100),
         max_document_size_mb: Number(data.config?.max_document_size_mb ?? DEFAULT_CONFIG_VALUES.max_document_size_mb),
@@ -2010,6 +2015,10 @@ function App() {
         case 'working_dir_isolation':
           next.working_dir_isolation = DEFAULT_CONFIG_VALUES.working_dir_isolation
           break
+        case 'high_risk_tool_user_confirmation_required':
+          next.high_risk_tool_user_confirmation_required =
+            DEFAULT_CONFIG_VALUES.high_risk_tool_user_confirmation_required
+          break
         case 'max_tool_iterations':
           next.max_tool_iterations = DEFAULT_CONFIG_VALUES.max_tool_iterations
           break
@@ -2139,6 +2148,8 @@ function App() {
         working_dir_isolation: normalizeWorkingDirIsolation(
           configDraft.working_dir_isolation || DEFAULT_CONFIG_VALUES.working_dir_isolation,
         ),
+        high_risk_tool_user_confirmation_required:
+          configDraft.high_risk_tool_user_confirmation_required !== false,
         max_tokens: Number(configDraft.max_tokens || 8192),
         max_tool_iterations: Number(configDraft.max_tool_iterations || 100),
         max_document_size_mb: Number(
@@ -2839,6 +2850,16 @@ function App() {
                           </ConfigFieldCard>
                         </div>
                         <div className="mt-4 grid grid-cols-1 gap-3">
+                          <ConfigToggleCard
+                            label="high_risk_tool_user_confirmation_required"
+                            description={<>Require explicit user confirmation before executing high-risk tools (for example <code>bash</code>).</>}
+                            checked={configDraft.high_risk_tool_user_confirmation_required !== false}
+                            onCheckedChange={(checked) =>
+                              setConfigField('high_risk_tool_user_confirmation_required', checked)
+                            }
+                            className={toggleCardClass}
+                            style={toggleCardStyle}
+                          />
                           <ConfigToggleCard
                             label="show_thinking"
                             description={<>Show intermediate reasoning text in responses.</>}

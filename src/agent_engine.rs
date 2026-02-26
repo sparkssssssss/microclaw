@@ -157,6 +157,33 @@ fn with_high_risk_approval_marker(input: &Value) -> Value {
     })
 }
 
+fn summarize_for_user_note(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = compact.chars().count();
+    if count <= max_chars {
+        compact
+    } else {
+        let clipped = compact.chars().take(max_chars).collect::<String>();
+        format!("{clipped}...")
+    }
+}
+
+fn format_failed_action_for_user(tool_name: &str, input: &Value, result_content: &str) -> String {
+    let error_summary = summarize_for_user_note(result_content, 140);
+    if tool_name == "bash" {
+        if let Some(command) = input
+            .get("command")
+            .or_else(|| input.get("cmd"))
+            .and_then(|v| v.as_str())
+        {
+            let command_summary = summarize_for_user_note(command, 140);
+            return format!("bash `{command_summary}` failed: {error_summary}");
+        }
+    }
+    let input_summary = summarize_for_user_note(&input.to_string(), 100);
+    format!("{tool_name} input `{input_summary}` failed: {error_summary}")
+}
+
 pub fn should_suppress_user_error(err: &anyhow::Error) -> bool {
     let text = err.to_string().to_ascii_lowercase();
     text.contains("http error: error sending request for url")
@@ -608,6 +635,9 @@ pub(crate) async fn process_with_agent_impl(
 
     // Agentic tool-use loop
     let mut failed_tools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut failed_tool_details: Vec<String> = Vec::new();
+    let mut seen_failed_tool_details: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     let mut empty_visible_reply_retry_attempted = false;
     let effective_model = state
         .llm_model_overrides
@@ -778,9 +808,24 @@ pub(crate) async fn process_with_agent_impl(
                 final_text
             } else {
                 let tools = failed_tools.iter().cloned().collect::<Vec<_>>().join(", ");
-                format!(
+                let mut text = format!(
                     "{final_text}\n\nExecution note: some tool actions failed in this request ({tools}). Ask me to retry if needed."
-                )
+                );
+                if !failed_tool_details.is_empty() {
+                    text.push_str("\nFailed actions:");
+                    let max_listed = 3usize;
+                    for detail in failed_tool_details.iter().take(max_listed) {
+                        text.push_str("\n- ");
+                        text.push_str(detail);
+                    }
+                    if failed_tool_details.len() > max_listed {
+                        text.push_str(&format!(
+                            "\n- ... and {} more.",
+                            failed_tool_details.len() - max_listed
+                        ));
+                    }
+                }
+                text
             };
             if let Some(tx) = event_tx {
                 let _ = tx.send(AgentEvent::FinalResponse {
@@ -940,6 +985,11 @@ pub(crate) async fn process_with_agent_impl(
                     if result.is_error && result.error_type.as_deref() != Some("approval_required")
                     {
                         failed_tools.insert(name.clone());
+                        let detail =
+                            format_failed_action_for_user(name, &executed_input, &result.content);
+                        if seen_failed_tool_details.insert(detail.clone()) {
+                            failed_tool_details.push(detail);
+                        }
                         let preview = if result.content.chars().count() > 300 {
                             let clipped = result.content.chars().take(300).collect::<String>();
                             format!("{clipped}...")
@@ -2300,6 +2350,10 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    struct FailedBashThenAnswerLlm {
+        calls: Arc<AtomicUsize>,
+    }
+
     #[async_trait::async_trait]
     impl LlmProvider for HighRiskNeedsUserConfirmLlm {
         async fn send_message(
@@ -2358,6 +2412,36 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl LlmProvider for FailedBashThenAnswerLlm {
+        async fn send_message(
+            &self,
+            _system: &str,
+            _messages: Vec<Message>,
+            _tools: Option<Vec<ToolDefinition>>,
+        ) -> Result<MessagesResponse, MicroClawError> {
+            let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+            if idx == 0 {
+                return Ok(MessagesResponse {
+                    content: vec![ResponseContentBlock::ToolUse {
+                        id: "tool-bash-fail".to_string(),
+                        name: "bash".to_string(),
+                        input: json!({"command": "git clone https://github.com/naamfung/zua.git /tmp/zua"}),
+                    }],
+                    stop_reason: Some("tool_use".to_string()),
+                    usage: None,
+                });
+            }
+            Ok(MessagesResponse {
+                content: vec![ResponseContentBlock::Text {
+                    text: "build step completed".to_string(),
+                }],
+                stop_reason: Some("end_turn".to_string()),
+                usage: None,
+            })
+        }
+    }
+
     #[tokio::test]
     async fn test_high_risk_tool_waits_for_user_confirmation_when_enabled() {
         let base_dir =
@@ -2389,6 +2473,46 @@ mod tests {
 
         assert!(reply.contains("waiting for your confirmation"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[tokio::test]
+    async fn test_failed_tool_note_includes_bash_command_details() {
+        let base_dir =
+            std::env::temp_dir().join(format!("mc_agent_failed_tool_note_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let llm = FailedBashThenAnswerLlm {
+            calls: calls.clone(),
+        };
+        let state = test_state_with_llm(&base_dir, Box::new(llm));
+        let chat_id = state
+            .db
+            .resolve_or_create_chat_id("web", "failed-tool-note-chat", Some("failed"), "web")
+            .unwrap();
+        store_user_message(&state.db, chat_id, "build this repo");
+
+        let reply = process_with_agent(
+            &state,
+            AgentRequestContext {
+                caller_channel: "web",
+                chat_id,
+                chat_type: "web",
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(reply.contains("build step completed"));
+        assert!(reply.contains("Execution note: some tool actions failed in this request (bash)."));
+        assert!(reply.contains("Failed actions:"));
+        assert!(reply.contains("bash `git clone https://github.com/naamfung/zua.git /tmp/zua` failed:"));
+        assert!(reply.contains("Command contains absolute /tmp path"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         drop(state);
         let _ = std::fs::remove_dir_all(&base_dir);
