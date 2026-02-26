@@ -591,6 +591,7 @@ struct SetupApp {
     backup_path: Option<String>,
     completion_summary: Vec<String>,
     llm_override_page: Option<LlmOverridePage>,
+    llm_override_picker: Option<LlmOverridePicker>,
 }
 
 #[derive(Clone)]
@@ -602,6 +603,14 @@ struct LlmOverridePage {
     base_url_key: String,
     selected: usize,
     editing: bool,
+}
+
+#[derive(Clone)]
+struct LlmOverridePicker {
+    title: String,
+    target_key: String,
+    options: Vec<(String, String)>,
+    selected: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -914,6 +923,7 @@ impl SetupApp {
             backup_path: None,
             completion_summary: Vec::new(),
             llm_override_page: None,
+            llm_override_picker: None,
         };
 
         for slot in 1..=MAX_BOT_SLOTS {
@@ -1677,6 +1687,90 @@ impl SetupApp {
             editing: false,
         });
         self.status = "Editing channel LLM overrides".to_string();
+    }
+
+    fn open_llm_override_provider_picker(&mut self) {
+        let Some(page) = self.llm_override_page.as_ref() else {
+            return;
+        };
+        let current = self.field_value(&page.provider_key);
+        let mut options = Vec::new();
+        for preset in PROVIDER_PRESETS {
+            options.push((
+                format!("{} - {}", preset.id, preset.label),
+                preset.id.to_string(),
+            ));
+        }
+        let selected = options
+            .iter()
+            .position(|(_, value)| value.eq_ignore_ascii_case(&current))
+            .unwrap_or(0);
+        self.llm_override_picker = Some(LlmOverridePicker {
+            title: "Select Provider".to_string(),
+            target_key: page.provider_key.clone(),
+            options,
+            selected,
+        });
+    }
+
+    fn open_llm_override_model_picker(&mut self) {
+        let Some(page) = self.llm_override_page.as_ref() else {
+            return;
+        };
+        let provider = self.field_value(&page.provider_key);
+        let Some(preset) = find_provider_preset(&provider) else {
+            if let Some(page_mut) = self.llm_override_page.as_mut() {
+                page_mut.editing = true;
+            }
+            self.status = "Unknown provider; switched to manual model input".to_string();
+            return;
+        };
+        if preset.models.is_empty() {
+            if let Some(page_mut) = self.llm_override_page.as_mut() {
+                page_mut.editing = true;
+            }
+            self.status = "No preset models; switched to manual model input".to_string();
+            return;
+        }
+        let current = self.field_value(&page.model_key);
+        let mut options = preset
+            .models
+            .iter()
+            .map(|m| ((*m).to_string(), (*m).to_string()))
+            .collect::<Vec<_>>();
+        options.push((
+            MODEL_PICKER_MANUAL_INPUT.to_string(),
+            MODEL_PICKER_MANUAL_INPUT.to_string(),
+        ));
+        let selected = options
+            .iter()
+            .position(|(_, value)| value == &current)
+            .unwrap_or(options.len().saturating_sub(1));
+        self.llm_override_picker = Some(LlmOverridePicker {
+            title: format!("Select Model ({provider})"),
+            target_key: page.model_key.clone(),
+            options,
+            selected,
+        });
+    }
+
+    fn apply_llm_override_picker_selection(&mut self) {
+        let Some(picker) = self.llm_override_picker.take() else {
+            return;
+        };
+        let Some((_, value)) = picker.options.get(picker.selected) else {
+            return;
+        };
+        if value == MODEL_PICKER_MANUAL_INPUT {
+            if let Some(page) = self.llm_override_page.as_mut() {
+                page.editing = true;
+                page.selected = 3;
+            }
+            self.status = "Editing model (manual input)".to_string();
+            return;
+        }
+        self.set_field_value(&picker.target_key, value.clone());
+        self.status = format!("Updated {}", picker.target_key);
     }
 
     fn llm_override_keys_for_page(page: &LlmOverridePage) -> [&str; 4] {
@@ -3837,50 +3931,77 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
 
     if let Some(page) = &app.llm_override_page {
         let overlay_area = frame.area().inner(Margin::new(6, 3));
-        let keys = SetupApp::llm_override_keys_for_page(page);
-        let mut lines = Vec::new();
-        for (idx, key) in keys.iter().enumerate() {
-            let selected = idx == page.selected;
-            let pointer = if selected { "▶ " } else { "  " };
-            let label = SetupApp::llm_override_label_for_key(key);
-            let raw = app.field_value(key);
-            let value = if *key == page.api_key_key.as_str() {
-                if selected && page.editing {
-                    raw
+        if let Some(picker) = &app.llm_override_picker {
+            let mut list_lines = Vec::with_capacity(picker.options.len());
+            for (i, (label, _)) in picker.options.iter().enumerate() {
+                let selected = i == picker.selected;
+                let pointer = if selected { "▶ " } else { "  " };
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    mask_secret(&raw)
-                }
-            } else {
-                raw
-            };
-            let style = if selected {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
+                    Style::default().fg(Color::White)
+                };
+                list_lines.push(Line::from(Span::styled(format!("{pointer}{label}"), style)));
+            }
+            let overlay = Paragraph::new(list_lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(picker.title.as_str())
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .style(Style::default().bg(Color::Black))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(Clear, overlay_area);
+            frame.render_widget(overlay, overlay_area);
+        } else {
+            let keys = SetupApp::llm_override_keys_for_page(page);
+            let mut lines = Vec::new();
+            for (idx, key) in keys.iter().enumerate() {
+                let selected = idx == page.selected;
+                let pointer = if selected { "▶ " } else { "  " };
+                let label = SetupApp::llm_override_label_for_key(key);
+                let raw = app.field_value(key);
+                let value = if *key == page.api_key_key.as_str() {
+                    if selected && page.editing {
+                        raw
+                    } else {
+                        mask_secret(&raw)
+                    }
+                } else {
+                    raw
+                };
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{pointer}{label}: {value}"),
+                    style,
+                )));
+            }
+            lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("{pointer}{label}: {value}"),
-                style,
+                "Enter edit/select · Esc close · ↑/↓/j/k/Ctrl+N/Ctrl+P move",
+                Style::default().fg(Color::DarkGray),
             )));
+            let overlay = Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(page.title.as_str())
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .style(Style::default().bg(Color::Black))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(Clear, overlay_area);
+            frame.render_widget(overlay, overlay_area);
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Enter edit/save · Esc close · ↑/↓/j/k/Ctrl+N/Ctrl+P move",
-            Style::default().fg(Color::DarkGray),
-        )));
-        let overlay = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(page.title.as_str())
-                    .style(Style::default().bg(Color::Black)),
-            )
-            .style(Style::default().bg(Color::Black))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(Clear, overlay_area);
-        frame.render_widget(overlay, overlay_area);
     } else if let Some(picker) = &app.picker {
         let overlay_area = frame.area().inner(Margin::new(8, 4));
         let (title, options): (&str, Vec<String>) = match picker.kind {
@@ -4048,6 +4169,39 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                 } else {
                     [String::new(), String::new(), String::new(), String::new()]
                 };
+                if app.llm_override_picker.is_some() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.llm_override_picker = None;
+                            app.status = "Selection closed".into();
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if let Some(picker) = app.llm_override_picker.as_mut() {
+                                picker.selected = picker.selected.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if let Some(picker) = app.llm_override_picker.as_mut() {
+                                picker.selected = (picker.selected + 1)
+                                    .min(picker.options.len().saturating_sub(1));
+                            }
+                        }
+                        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if let Some(picker) = app.llm_override_picker.as_mut() {
+                                picker.selected = picker.selected.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if let Some(picker) = app.llm_override_picker.as_mut() {
+                                picker.selected = (picker.selected + 1)
+                                    .min(picker.options.len().saturating_sub(1));
+                            }
+                        }
+                        KeyCode::Enter => app.apply_llm_override_picker_selection(),
+                        _ => {}
+                    }
+                    continue;
+                }
                 match key.code {
                     KeyCode::Esc => {
                         if let Some(page) = app.llm_override_page.as_mut() {
@@ -4091,13 +4245,29 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                         }
                     }
                     KeyCode::Enter => {
-                        if let Some(page) = app.llm_override_page.as_mut() {
-                            page.editing = !page.editing;
-                            if page.editing {
-                                app.status = "Editing channel LLM override field".into();
+                        let (selected_key, provider_key, model_key, editing) =
+                            if let Some(page) = app.llm_override_page.as_ref() {
+                                (
+                                    keys[page.selected].clone(),
+                                    page.provider_key.clone(),
+                                    page.model_key.clone(),
+                                    page.editing,
+                                )
                             } else {
-                                app.status = "Updated channel LLM override field".into();
+                                (String::new(), String::new(), String::new(), false)
+                            };
+                        if editing {
+                            if let Some(page) = app.llm_override_page.as_mut() {
+                                page.editing = false;
                             }
+                            app.status = "Updated channel LLM override field".into();
+                        } else if selected_key == provider_key {
+                            app.open_llm_override_provider_picker();
+                        } else if selected_key == model_key {
+                            app.open_llm_override_model_picker();
+                        } else if let Some(page) = app.llm_override_page.as_mut() {
+                            page.editing = true;
+                            app.status = "Editing channel LLM override field".into();
                         }
                     }
                     KeyCode::Backspace => {
