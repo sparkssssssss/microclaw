@@ -3944,6 +3944,7 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
         Line::from("• Ctrl+R: restore field default"),
         Line::from("• F2: validate + online checks"),
         Line::from("• s / Ctrl+S: save config"),
+        Line::from("• Ctrl+Shift+S: save without online model validation"),
     ])
     .block(
         Block::default()
@@ -4172,6 +4173,38 @@ fn try_save(terminal: &mut DefaultTerminal, app: &mut SetupApp) -> Result<(), Mi
     app.backup_path = backup;
     app.completion_summary = checks;
     app.status = "Saved microclaw.config.yaml".into();
+    app.completed = true;
+    Ok(())
+}
+
+fn try_save_skip_online(
+    terminal: &mut DefaultTerminal,
+    app: &mut SetupApp,
+) -> Result<(), MicroClawError> {
+    app.status = "Saving (1/2): local validation...".into();
+    terminal.draw(|f| draw_ui(f, app))?;
+    if let Err(e) = app.validate_local() {
+        app.status = format!("Cannot save: {e}");
+        return Ok(());
+    }
+
+    let values = app.to_env_map();
+    let backup = match run_with_spinner(
+        terminal,
+        app,
+        "Saving (2/2): writing microclaw.config.yaml",
+        move || save_config_yaml(Path::new("microclaw.config.yaml"), &values),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            app.status = format!("Cannot save: {e}");
+            return Ok(());
+        }
+    };
+
+    app.backup_path = backup;
+    app.completion_summary = vec!["Online/model validation skipped by user".to_string()];
+    app.status = "Saved microclaw.config.yaml (online validation skipped)".into();
     app.completed = true;
     Ok(())
 }
@@ -4464,7 +4497,15 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                     Err(e) => app.status = format!("Validation failed: {e}"),
                 },
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    try_save(&mut terminal, &mut app)?;
+                    if key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::Char('S')
+                    {
+                        try_save_skip_online(&mut terminal, &mut app)?;
+                    } else {
+                        try_save(&mut terminal, &mut app)?;
+                    }
+                }
+                KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    try_save_skip_online(&mut terminal, &mut app)?;
                 }
                 KeyCode::Char('s') => {
                     try_save(&mut terminal, &mut app)?;
