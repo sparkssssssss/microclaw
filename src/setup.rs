@@ -1838,6 +1838,39 @@ impl SetupApp {
         None
     }
 
+    fn llm_override_related_keys_for_model_field(field_key: &str) -> Option<[String; 4]> {
+        if field_key == "TELEGRAM_MODEL" {
+            return Some([
+                telegram_llm_provider_key().to_string(),
+                telegram_llm_api_key_key().to_string(),
+                telegram_llm_base_url_key().to_string(),
+                "TELEGRAM_MODEL".to_string(),
+            ]);
+        }
+        if field_key == "DISCORD_MODEL" {
+            return Some([
+                discord_llm_provider_key().to_string(),
+                discord_llm_api_key_key().to_string(),
+                discord_llm_base_url_key().to_string(),
+                "DISCORD_MODEL".to_string(),
+            ]);
+        }
+        for ch in DYNAMIC_CHANNELS {
+            for slot in 1..=MAX_BOT_SLOTS {
+                let model_key = dynamic_slot_field_key(ch.name, slot, "model");
+                if field_key == model_key {
+                    return Some([
+                        dynamic_slot_llm_provider_key(ch.name, slot),
+                        dynamic_slot_llm_api_key_key(ch.name, slot),
+                        dynamic_slot_llm_base_url_key(ch.name, slot),
+                        model_key,
+                    ]);
+                }
+            }
+        }
+        None
+    }
+
     fn to_env_map(&self) -> HashMap<String, String> {
         let mut out = HashMap::new();
         for field in &self.fields {
@@ -2760,7 +2793,13 @@ impl SetupApp {
 
     fn clear_selected_field(&mut self) {
         let key = self.selected_field().key.clone();
-        self.selected_field_mut().value.clear();
+        if let Some(keys) = Self::llm_override_related_keys_for_model_field(&key) {
+            for k in keys {
+                self.set_field_value(&k, String::new());
+            }
+        } else {
+            self.selected_field_mut().value.clear();
+        }
         self.status = format!("Cleared {key}");
     }
 
@@ -5150,5 +5189,49 @@ sandbox:
         app.apply_picker_selection();
         assert!(app.editing);
         assert!(app.status.contains("manual input"));
+    }
+
+    #[test]
+    fn test_clear_model_override_field_clears_related_llm_override_fields() {
+        let mut app = SetupApp::new();
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "ENABLED_CHANNELS") {
+            field.value = "telegram".to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "TELEGRAM_MODEL") {
+            field.value = "gpt-5".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == telegram_llm_provider_key())
+        {
+            field.value = "openai".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == telegram_llm_api_key_key())
+        {
+            field.value = "sk-123".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == telegram_llm_base_url_key())
+        {
+            field.value = "https://api.openai.com/v1".to_string();
+        }
+
+        app.selected = app
+            .fields
+            .iter()
+            .position(|f| f.key == "TELEGRAM_MODEL")
+            .expect("TELEGRAM_MODEL field missing");
+        app.clear_selected_field();
+
+        assert_eq!(app.field_value("TELEGRAM_MODEL"), "");
+        assert_eq!(app.field_value(telegram_llm_provider_key()), "");
+        assert_eq!(app.field_value(telegram_llm_api_key_key()), "");
+        assert_eq!(app.field_value(telegram_llm_base_url_key()), "");
     }
 }
