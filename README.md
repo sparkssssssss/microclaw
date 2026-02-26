@@ -798,6 +798,7 @@ All configuration is via `microclaw.config.yaml`:
 | `data_dir` | No | `~/.microclaw` | Data root (`runtime` data in `data_dir/runtime`, skills in `data_dir/skills`) |
 | `working_dir` | No | `~/.microclaw/working_dir` | Default working directory for tool operations; relative paths in `bash/read_file/write_file/edit_file/glob/grep` resolve from here |
 | `working_dir_isolation` | No | `chat` | Working directory isolation mode for `bash/read_file/write_file/edit_file/glob/grep`: `shared` uses `working_dir/shared`, `chat` isolates each chat under `working_dir/chat/<channel>/<chat_id>` |
+| `high_risk_tool_user_confirmation_required` | No | `true` | Require explicit user confirmation before high-risk tool execution (for example `bash`) |
 | `sandbox.mode` | No | `off` | Container sandbox mode for bash tool execution: `off` runs on host; `all` routes bash commands into docker containers |
 | `sandbox.security_profile` | No | `hardened` | Sandbox privilege profile: `hardened` (`--cap-drop ALL --security-opt no-new-privileges`), `standard` (Docker default caps), `privileged` (`--privileged`) |
 | `sandbox.cap_add` | No | `[]` | Optional extra Linux capabilities to add (`--cap-add`); applies to `hardened` and `standard` profiles |
