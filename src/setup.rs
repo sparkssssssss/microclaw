@@ -606,37 +606,6 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
-                    key: "TELEGRAM_BOT_TOKEN".into(),
-                    label: "Telegram bot token".into(),
-                    value: existing.get("TELEGRAM_BOT_TOKEN").cloned().unwrap_or_default(),
-                    required: false,
-                    secret: true,
-                },
-                Field {
-                    key: "BOT_USERNAME".into(),
-                    label: "Telegram username (no @)".into(),
-                    value: existing.get("BOT_USERNAME").cloned().unwrap_or_default(),
-                    required: false,
-                    secret: false,
-                },
-                Field {
-                    key: "TELEGRAM_ACCOUNT_ID".into(),
-                    label: "Telegram default account id".into(),
-                    value: existing
-                        .get("TELEGRAM_ACCOUNT_ID")
-                        .cloned()
-                        .unwrap_or_else(|| default_account_id().to_string()),
-                    required: false,
-                    secret: false,
-                },
-                Field {
-                    key: "TELEGRAM_MODEL".into(),
-                    label: "Telegram bot model override (optional)".into(),
-                    value: existing.get("TELEGRAM_MODEL").cloned().unwrap_or_default(),
-                    required: false,
-                    secret: false,
-                },
-                Field {
                     key: telegram_bot_count_key().into(),
                     label: format!("Telegram bot count (1-{MAX_BOT_SLOTS})"),
                     value: existing
@@ -1115,9 +1084,9 @@ impl SetupApp {
                         .and_then(|ch_cfg| ch_cfg.get("accounts"))
                         .and_then(compact_json_string)
                         .unwrap_or_default();
-                    map.insert("TELEGRAM_BOT_TOKEN".into(), telegram_bot_token);
+                    map.insert("TELEGRAM_BOT_TOKEN".into(), telegram_bot_token.clone());
                     map.insert("TELEGRAM_ACCOUNT_ID".into(), telegram_account_id.clone());
-                    map.insert("TELEGRAM_MODEL".into(), telegram_model);
+                    map.insert("TELEGRAM_MODEL".into(), telegram_model.clone());
                     map.insert(
                         telegram_bot_count_key().into(),
                         telegram_bot_count.to_string(),
@@ -1181,7 +1150,40 @@ impl SetupApp {
                             }
                         }
                     }
-                    map.insert("BOT_USERNAME".into(), bot_username);
+                    map.insert("BOT_USERNAME".into(), bot_username.clone());
+                    // Backward compatibility: when Telegram has only legacy top-level values,
+                    // prefill slot #1 so setup UI can edit in slot form only.
+                    if map
+                        .get(&telegram_slot_id_key(1))
+                        .map(|v| v.trim().is_empty())
+                        .unwrap_or(true)
+                    {
+                        map.insert(telegram_slot_id_key(1), telegram_account_id.clone());
+                    }
+                    if map
+                        .get(&telegram_slot_token_key(1))
+                        .map(|v| v.trim().is_empty())
+                        .unwrap_or(true)
+                        && !telegram_bot_token.trim().is_empty()
+                    {
+                        map.insert(telegram_slot_token_key(1), telegram_bot_token.clone());
+                    }
+                    if map
+                        .get(&telegram_slot_username_key(1))
+                        .map(|v| v.trim().is_empty())
+                        .unwrap_or(true)
+                        && !bot_username.trim().is_empty()
+                    {
+                        map.insert(telegram_slot_username_key(1), bot_username.clone());
+                    }
+                    if map
+                        .get(&telegram_slot_model_key(1))
+                        .map(|v| v.trim().is_empty())
+                        .unwrap_or(true)
+                        && !telegram_model.trim().is_empty()
+                    {
+                        map.insert(telegram_slot_model_key(1), telegram_model.clone());
+                    }
                     map.insert("DISCORD_BOT_TOKEN".into(), discord_bot_token);
                     map.insert("DISCORD_ACCOUNT_ID".into(), discord_account_id);
                     map.insert("DISCORD_MODEL".into(), discord_model);
@@ -1499,7 +1501,7 @@ impl SetupApp {
     fn is_field_visible(&self, key: &str) -> bool {
         match key {
             "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" | "TELEGRAM_ACCOUNT_ID" | "TELEGRAM_MODEL" => {
-                self.channel_enabled("telegram")
+                false
             }
             _ if key == telegram_bot_count_key() => self.channel_enabled("telegram"),
             _ if key.starts_with("TELEGRAM_BOT") => {
@@ -1694,11 +1696,12 @@ impl SetupApp {
                 &self.field_value(telegram_bot_count_key()),
                 telegram_bot_count_key(),
             )?;
-            let account_id = account_id_from_value(&self.field_value("TELEGRAM_ACCOUNT_ID"));
+            let account_id = account_id_from_value(&self.field_value(&telegram_slot_id_key(1)));
             if !is_valid_account_id(&account_id) {
-                return Err(MicroClawError::Config(
-                    "TELEGRAM_ACCOUNT_ID must use only letters, numbers, '_' or '-'".into(),
-                ));
+                return Err(MicroClawError::Config(format!(
+                    "{} must use only letters, numbers, '_' or '-'",
+                    telegram_slot_id_key(1)
+                )));
             }
             let telegram_slot_accounts = self.telegram_slot_accounts_from_fields()?;
             let telegram_slot_has_account_token = telegram_slot_accounts.values().any(|account| {
@@ -1720,16 +1723,31 @@ impl SetupApp {
                     "TELEGRAM_BOT_TOKEN or TELEGRAM_BOT#_TOKEN is required when telegram is enabled".into(),
                 ));
             }
-            let username = self.field_value("BOT_USERNAME");
-            if username.is_empty() {
+            let slot_has_username = (1..=self.telegram_bot_count()).any(|slot| {
+                !self
+                    .field_value(&telegram_slot_username_key(slot))
+                    .trim()
+                    .is_empty()
+            });
+            if self.field_value("BOT_USERNAME").is_empty() && !slot_has_username {
                 return Err(MicroClawError::Config(
-                    "BOT_USERNAME is required when telegram is enabled".into(),
+                    "TELEGRAM_BOT#_USERNAME is required when telegram is enabled".into(),
                 ));
             }
+            let username = self.field_value("BOT_USERNAME");
             if username.starts_with('@') {
                 return Err(MicroClawError::Config(
                     "BOT_USERNAME should not include '@'".into(),
                 ));
+            }
+            for slot in 1..=self.telegram_bot_count() {
+                let username = self.field_value(&telegram_slot_username_key(slot));
+                if username.starts_with('@') {
+                    return Err(MicroClawError::Config(format!(
+                        "{} should not include '@'",
+                        telegram_slot_username_key(slot)
+                    )));
+                }
             }
         }
 
@@ -1905,6 +1923,8 @@ impl SetupApp {
         let tg_enabled = self.channel_enabled("telegram");
         let tg_token = if !self.field_value("TELEGRAM_BOT_TOKEN").is_empty() {
             self.field_value("TELEGRAM_BOT_TOKEN")
+        } else if !self.field_value(&telegram_slot_token_key(1)).is_empty() {
+            self.field_value(&telegram_slot_token_key(1))
         } else {
             self.telegram_slot_accounts_from_fields()?
                 .into_values()
@@ -1918,10 +1938,25 @@ impl SetupApp {
                 })
                 .unwrap_or_default()
         };
-        let env_username = self
-            .field_value("BOT_USERNAME")
-            .trim_start_matches('@')
-            .to_string();
+        let env_username = if !self.field_value("BOT_USERNAME").is_empty() {
+            self.field_value("BOT_USERNAME")
+        } else if !self.field_value(&telegram_slot_username_key(1)).is_empty() {
+            self.field_value(&telegram_slot_username_key(1))
+        } else {
+            self.telegram_slot_accounts_from_fields()?
+                .into_values()
+                .find_map(|account| {
+                    account
+                        .get("bot_username")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(ToOwned::to_owned)
+                })
+                .unwrap_or_default()
+        }
+        .trim_start_matches('@')
+        .to_string();
         let provider = self.field_value("LLM_PROVIDER").to_lowercase();
         let (api_key, codex_account_id) = if is_openai_codex_provider(&provider) {
             let auth = resolve_openai_codex_auth("")?;
@@ -2709,10 +2744,27 @@ fn save_config_yaml(
         channels.clone()
     };
     let channel_selected = |name: &str| selected_channels.iter().any(|c| c == name);
-    let telegram_token = get("TELEGRAM_BOT_TOKEN");
-    let telegram_username = get("BOT_USERNAME");
-    let telegram_account_id = account_id_from_value(&get("TELEGRAM_ACCOUNT_ID"));
-    let telegram_model = get("TELEGRAM_MODEL");
+    let telegram_token = if !get("TELEGRAM_BOT_TOKEN").trim().is_empty() {
+        get("TELEGRAM_BOT_TOKEN")
+    } else {
+        get(&telegram_slot_token_key(1))
+    };
+    let telegram_username = if !get("BOT_USERNAME").trim().is_empty() {
+        get("BOT_USERNAME")
+    } else {
+        get(&telegram_slot_username_key(1))
+    };
+    let telegram_account_id =
+        account_id_from_value(&if !get("TELEGRAM_ACCOUNT_ID").trim().is_empty() {
+            get("TELEGRAM_ACCOUNT_ID")
+        } else {
+            get(&telegram_slot_id_key(1))
+        });
+    let telegram_model = if !get("TELEGRAM_MODEL").trim().is_empty() {
+        get("TELEGRAM_MODEL")
+    } else {
+        get(&telegram_slot_model_key(1))
+    };
     let telegram_bot_count =
         parse_bot_count(&get(telegram_bot_count_key()), telegram_bot_count_key())?;
     let mut telegram_slot_accounts = serde_json::Map::new();
@@ -3808,9 +3860,10 @@ sandbox:
             .map(|idx| app.fields[*idx].key.clone())
             .collect();
         let hidden_keys = vec![
-            "TELEGRAM_BOT_TOKEN".to_string(),
-            "BOT_USERNAME".to_string(),
-            "TELEGRAM_ACCOUNT_ID".to_string(),
+            telegram_bot_count_key().to_string(),
+            telegram_slot_id_key(1),
+            telegram_slot_token_key(1),
+            telegram_slot_username_key(1),
             "DISCORD_BOT_TOKEN".to_string(),
             "DISCORD_ACCOUNT_ID".to_string(),
             dynamic_bot_count_field_key("feishu"),
@@ -3836,9 +3889,10 @@ sandbox:
             .map(|idx| app.fields[*idx].key.clone())
             .collect();
         let shown_keys = vec![
-            "TELEGRAM_BOT_TOKEN".to_string(),
-            "BOT_USERNAME".to_string(),
-            "TELEGRAM_ACCOUNT_ID".to_string(),
+            telegram_bot_count_key().to_string(),
+            telegram_slot_id_key(1),
+            telegram_slot_token_key(1),
+            telegram_slot_username_key(1),
             dynamic_bot_count_field_key("feishu"),
             dynamic_slot_id_field_key("feishu", 1),
             dynamic_slot_field_key("feishu", 1, "app_id"),
@@ -3940,17 +3994,21 @@ sandbox:
         if let Some(field) = app
             .fields
             .iter_mut()
-            .find(|f| f.key == "TELEGRAM_BOT_TOKEN")
+            .find(|f| f.key == telegram_slot_token_key(1))
         {
             field.value = "123456:token".to_string();
         }
-        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "BOT_USERNAME") {
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == telegram_slot_username_key(1))
+        {
             field.value = "botname".to_string();
         }
         if let Some(field) = app
             .fields
             .iter_mut()
-            .find(|f| f.key == "TELEGRAM_ACCOUNT_ID")
+            .find(|f| f.key == telegram_slot_id_key(1))
         {
             field.value = "invalid account".to_string();
         }
@@ -3958,9 +4016,10 @@ sandbox:
             field.value = "key".to_string();
         }
         let err = app.validate_local().unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("TELEGRAM_ACCOUNT_ID must use only letters, numbers, '_' or '-'"));
+        assert!(err.to_string().contains(&format!(
+            "{} must use only letters, numbers, '_' or '-'",
+            telegram_slot_id_key(1)
+        )));
     }
 
     #[test]
@@ -3975,9 +4034,6 @@ sandbox:
             .find(|f| f.key == telegram_bot_count_key())
         {
             field.value = "2".to_string();
-        }
-        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "BOT_USERNAME") {
-            field.value = "botname".to_string();
         }
         if let Some(field) = app
             .fields
@@ -4028,9 +4084,6 @@ sandbox:
             .find(|f| f.key == telegram_bot_count_key())
         {
             field.value = "2".to_string();
-        }
-        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "BOT_USERNAME") {
-            field.value = "botname".to_string();
         }
         if let Some(field) = app
             .fields
@@ -4087,16 +4140,6 @@ sandbox:
         {
             field.value = "2".to_string();
         }
-        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "BOT_USERNAME") {
-            field.value = "botname".to_string();
-        }
-        if let Some(field) = app
-            .fields
-            .iter_mut()
-            .find(|f| f.key == "TELEGRAM_BOT_TOKEN")
-        {
-            field.value.clear();
-        }
         if let Some(field) = app
             .fields
             .iter_mut()
@@ -4112,7 +4155,7 @@ sandbox:
         assert!(
             text.contains("TELEGRAM_BOT")
                 || text.contains("TELEGRAM_BOT_COUNT")
-                || text.contains("BOT_USERNAME")
+                || text.contains("USERNAME")
         );
     }
 
@@ -4132,7 +4175,6 @@ sandbox:
         values.insert(telegram_slot_id_key(2), "support".into());
         values.insert(telegram_slot_enabled_key(2), "false".into());
         values.insert(telegram_slot_token_key(2), "tg_support".into());
-        values.insert("BOT_USERNAME".into(), "main_bot".into());
         values.insert("LLM_PROVIDER".into(), "anthropic".into());
         values.insert("LLM_API_KEY".into(), "key".into());
 
