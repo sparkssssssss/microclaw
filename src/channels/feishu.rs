@@ -160,13 +160,6 @@ pub struct FeishuChannelConfig {
     pub default_account: Option<String>,
 }
 
-fn domain_supports_topic_mode(domain: &str) -> bool {
-    matches!(
-        domain.trim().to_ascii_lowercase().as_str(),
-        "feishu" | "lark"
-    )
-}
-
 fn pick_default_account_id(
     configured: Option<&str>,
     accounts: &HashMap<String, FeishuAccountConfig>,
@@ -2284,13 +2277,6 @@ commands:
     }
 
     #[test]
-    fn test_domain_supports_topic_mode_only_for_feishu_lark() {
-        assert!(domain_supports_topic_mode("feishu"));
-        assert!(domain_supports_topic_mode("lark"));
-        assert!(!domain_supports_topic_mode("custom"));
-    }
-
-    #[test]
     fn test_build_runtime_inherits_channel_topic_mode_when_account_not_set() {
         let mut cfg = crate::config::Config::test_defaults();
         cfg.channels.insert(
@@ -2298,12 +2284,12 @@ commands:
             serde_yaml::from_str(
                 r#"
 enabled: true
-topic_mode: true
 accounts:
   main:
     enabled: true
     app_id: "a"
     app_secret: "b"
+    topic_mode: true
 "#,
             )
             .unwrap(),
