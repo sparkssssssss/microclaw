@@ -24,6 +24,73 @@ fn compute_next_run(cron_expr: &str, tz_name: &str) -> Result<String, String> {
     Ok(next.with_timezone(&chrono::Utc).to_rfc3339())
 }
 
+fn parse_cron_fields(cron_expr: &str) -> Vec<&str> {
+    cron_expr.split_whitespace().collect()
+}
+
+fn cron_human_hint(cron_expr: &str) -> Option<String> {
+    let fields = parse_cron_fields(cron_expr);
+    if fields.len() != 6 {
+        return None;
+    }
+    let sec = fields[0];
+    let min = fields[1];
+    let hour = fields[2];
+    let dom = fields[3];
+    let month = fields[4];
+    let dow = fields[5];
+
+    if sec == "0" && min == "*" && hour == "*" && dom == "*" && month == "*" && dow == "*" {
+        return Some("every minute".to_string());
+    }
+
+    if sec == "0"
+        && min.starts_with("*/")
+        && hour == "*"
+        && dom == "*"
+        && month == "*"
+        && dow == "*"
+    {
+        if let Some(step) = min.strip_prefix("*/") {
+            return Some(format!("every {step} minutes"));
+        }
+    }
+
+    if sec == "0"
+        && min.parse::<u32>().is_ok()
+        && hour == "*"
+        && dom == "*"
+        && month == "*"
+        && dow == "*"
+    {
+        return Some(format!("every hour at minute {:0>2}", min));
+    }
+
+    if sec == "0"
+        && min.parse::<u32>().is_ok()
+        && hour.starts_with("*/")
+        && dom == "*"
+        && month == "*"
+        && dow == "*"
+    {
+        if let Some(step) = hour.strip_prefix("*/") {
+            return Some(format!("every {step} hours"));
+        }
+    }
+
+    if sec == "0"
+        && min.parse::<u32>().is_ok()
+        && hour.parse::<u32>().is_ok()
+        && dom == "*"
+        && month == "*"
+        && dow == "*"
+    {
+        return Some(format!("daily at {:0>2}:{:0>2}", hour, min));
+    }
+
+    None
+}
+
 // --- schedule_task ---
 
 pub struct ScheduleTaskTool {
@@ -149,9 +216,19 @@ impl Tool for ScheduleTaskTool {
         })
         .await
         {
-            Ok(id) => ToolResult::success(format!(
-                "Task #{id} scheduled (tz: {tz_name}). Next run: {next_run}"
-            )),
+            Ok(id) => {
+                let cadence = if schedule_type == "cron" {
+                    cron_human_hint(schedule_value)
+                } else {
+                    None
+                };
+                let mut message =
+                    format!("Task #{id} scheduled (tz: {tz_name}). Next run: {next_run}");
+                if let Some(c) = cadence {
+                    message.push_str(&format!("\nCron interpretation: {c}."));
+                }
+                ToolResult::success(message)
+            }
             Err(e) => ToolResult::error(format!("Failed to create task: {e}")),
         }
     }
@@ -213,9 +290,22 @@ impl Tool for ListTasksTool {
                 }
                 let mut output = String::new();
                 for t in &tasks {
+                    let cadence = if t.schedule_type == "cron" {
+                        cron_human_hint(&t.schedule_value)
+                            .map(|s| format!(" | cadence: {s}"))
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     output.push_str(&format!(
-                        "#{} [{}] {} | {} '{}' | next: {}\n",
-                        t.id, t.status, t.prompt, t.schedule_type, t.schedule_value, t.next_run
+                        "#{} [{}] {} | {} '{}'{} | next: {}\n",
+                        t.id,
+                        t.status,
+                        t.prompt,
+                        t.schedule_type,
+                        t.schedule_value,
+                        cadence,
+                        t.next_run
                     ));
                 }
                 ToolResult::success(output)
@@ -800,6 +890,18 @@ mod tests {
         assert!(result.unwrap_err().contains("Invalid timezone"));
     }
 
+    #[test]
+    fn test_cron_human_hint_every_minutes() {
+        let hint = cron_human_hint("0 */2 * * * *");
+        assert_eq!(hint.as_deref(), Some("every 2 minutes"));
+    }
+
+    #[test]
+    fn test_cron_human_hint_every_hours() {
+        let hint = cron_human_hint("0 0 */2 * * *");
+        assert_eq!(hint.as_deref(), Some("every 2 hours"));
+    }
+
     #[tokio::test]
     async fn test_schedule_task_cron() {
         let (db, dir) = test_db();
@@ -815,6 +917,7 @@ mod tests {
         assert!(!result.is_error, "Error: {}", result.content);
         assert!(result.content.contains("scheduled"));
         assert!(result.content.contains("Next run"));
+        assert!(result.content.contains("Cron interpretation"));
         cleanup(&dir);
     }
 
@@ -909,6 +1012,7 @@ mod tests {
         assert!(result.content.contains("task A"));
         assert!(result.content.contains("task B"));
         assert!(result.content.contains("[active]"));
+        assert!(result.content.contains("cadence:"));
         cleanup(&dir);
     }
 
