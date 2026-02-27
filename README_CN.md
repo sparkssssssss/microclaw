@@ -603,6 +603,7 @@ microclaw gateway uninstall
 | `data_dir` | 否 | `~/.microclaw` | 数据根目录（运行时数据在 `data_dir/runtime`，技能在 `data_dir/skills`） |
 | `working_dir` | 否 | `~/.microclaw/working_dir` | 工具默认工作目录；`bash/read_file/write_file/edit_file/glob/grep` 的相对路径都以此为基准 |
 | `working_dir_isolation` | 否 | `chat` | 工具工作目录隔离模式：`shared` 使用 `working_dir/shared`，`chat` 使用 `working_dir/chat/<channel>/<chat_id>` |
+| `high_risk_tool_user_confirmation_required` | 否 | `true` | 高风险工具（例如 `bash`）执行前是否必须等待用户明确确认 |
 | `sandbox.mode` | 否 | `off` | `bash` 工具的容器沙箱模式：`off` 在宿主执行；`all` 通过 docker 容器执行 |
 | `sandbox.mount_allowlist_path` | 否 | 未设置 | 可选外部挂载白名单文件（每行一个允许根路径） |
 | `max_tokens` | 否 | `8192` | 每次模型回复的最大 token |

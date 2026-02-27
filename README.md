@@ -610,7 +610,7 @@ The `config` flow provides:
 - Provider selection + model selection (numbered choices with custom override)
 - Better Ollama UX: local model auto-detection + sensible local defaults
 - Channel credentials are written in multi-account form by default (`channels.<channel>.default_account` + `channels.<channel>.accounts.main`)
-- Safe `microclaw.config.yaml` save with automatic backup
+- Safe `microclaw.config.yaml` save with automatic backup in `microclaw.config.backups/` (keeps latest 50)
 - Auto-created directories for `data_dir` and `working_dir`
 
 If you prefer the full-screen TUI, you can still run:
@@ -696,10 +696,12 @@ bot_username: "my_bot"
 #       main:
 #         app_id: "cli_xxx"
 #         app_secret: "xxx"
+#         topic_mode: true    # optional; only supported for domain feishu/lark
 #       intl:
 #         app_id: "cli_yyy"
 #         app_secret: "yyy"
 #         domain: "lark"
+#         topic_mode: true    # optional; only supported for domain feishu/lark
 # recommended IRC mode:
 # channels:
 #   irc:
@@ -775,7 +777,7 @@ All configuration is via `microclaw.config.yaml`:
 | `channels.telegram.accounts.<id>.model` | No | unset | Optional per-bot model override for that Telegram account |
 | `channels.telegram.allowed_user_ids` | No | `[]` | Optional Telegram private chat sender allowlist at channel scope |
 | `channels.telegram.accounts.<id>.allowed_groups` | No | `[]` | Optional Telegram group allowlist scoped to one account |
-| `channels.telegram.accounts.<id>.allowed_user_ids` | No | `[]` | Optional Telegram private chat sender allowlist scoped to one account (overrides channel scope) |
+| `channels.telegram.accounts.<id>.allowed_user_ids` | No | `[]` | Optional Telegram private chat sender allowlist scoped to one account (merged with channel scope) |
 | `discord_bot_token` | No* | -- | Discord bot token from Discord Developer Portal |
 | `channels.discord.default_account` | No | unset | Default Discord account ID in multi-account mode |
 | `channels.discord.accounts.<id>.bot_token` | No* | unset | Discord bot token for a specific account |
@@ -796,6 +798,7 @@ All configuration is via `microclaw.config.yaml`:
 | `data_dir` | No | `~/.microclaw` | Data root (`runtime` data in `data_dir/runtime`, skills in `data_dir/skills`) |
 | `working_dir` | No | `~/.microclaw/working_dir` | Default working directory for tool operations; relative paths in `bash/read_file/write_file/edit_file/glob/grep` resolve from here |
 | `working_dir_isolation` | No | `chat` | Working directory isolation mode for `bash/read_file/write_file/edit_file/glob/grep`: `shared` uses `working_dir/shared`, `chat` isolates each chat under `working_dir/chat/<channel>/<chat_id>` |
+| `high_risk_tool_user_confirmation_required` | No | `true` | Require explicit user confirmation before high-risk tool execution (for example `bash`) |
 | `sandbox.mode` | No | `off` | Container sandbox mode for bash tool execution: `off` runs on host; `all` routes bash commands into docker containers |
 | `sandbox.security_profile` | No | `hardened` | Sandbox privilege profile: `hardened` (`--cap-drop ALL --security-opt no-new-privileges`), `standard` (Docker default caps), `privileged` (`--privileged`) |
 | `sandbox.cap_add` | No | `[]` | Optional extra Linux capabilities to add (`--cap-add`); applies to `hardened` and `standard` profiles |
@@ -824,6 +827,7 @@ All configuration is via `microclaw.config.yaml`:
 | `channels.feishu.accounts.<id>.domain` | No | `feishu` | Feishu domain for that account (`feishu`, `lark`, or custom URL) |
 | `channels.feishu.accounts.<id>.allowed_chats` | No | `[]` | Optional Feishu chat allowlist scoped to one account |
 | `channels.feishu.accounts.<id>.model` | No | unset | Optional per-bot model override for that Feishu/Lark account |
+| `channels.feishu.accounts.<id>.topic_mode` | No | `false` | Optional per-bot threaded reply mode; only supported when account domain is `feishu` or `lark` |
 | `channels.irc.server` | No* | unset | IRC server host/IP |
 | `channels.irc.port` | No | `"6667"` | IRC server port |
 | `channels.irc.nick` | No* | unset | IRC bot nick |

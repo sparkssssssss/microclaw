@@ -1,6 +1,7 @@
 /target
 microclaw.config.yaml
 microclaw.config.yaml.*
+microclaw.config.backups/
 microclaw.data/
 website/
 tmp/

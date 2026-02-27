@@ -74,6 +74,13 @@ pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
             secret: false,
             required: false,
         },
+        ChannelFieldDef {
+            yaml_key: "topic_mode",
+            label: "Feishu topic mode (true/false, feishu/lark only)",
+            default: "false",
+            secret: false,
+            required: false,
+        },
     ],
 };
 
@@ -151,6 +158,13 @@ pub struct FeishuChannelConfig {
     pub accounts: HashMap<String, FeishuAccountConfig>,
     #[serde(default)]
     pub default_account: Option<String>,
+}
+
+fn domain_supports_topic_mode(domain: &str) -> bool {
+    matches!(
+        domain.trim().to_ascii_lowercase().as_str(),
+        "feishu" | "lark"
+    )
 }
 
 fn pick_default_account_id(
@@ -1775,8 +1789,14 @@ async fn handle_feishu_message(
         if !should_respond && !app_state.config.allow_group_slash_without_mention {
             return;
         }
-        if let Some(reply) =
-            handle_chat_command(&app_state, chat_id, &runtime.channel_name, trimmed).await
+        if let Some(reply) = handle_chat_command(
+            &app_state,
+            chat_id,
+            &runtime.channel_name,
+            trimmed,
+            Some(user),
+        )
+        .await
         {
             let _ = send_feishu_response(
                 &http_client,
@@ -2261,5 +2281,36 @@ commands:
         let out = maybe_plugin_slash_response(&cfg, "/feishuplug", 1, "feishu").await;
         assert_eq!(out.as_deref(), Some("feishu-ok"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_domain_supports_topic_mode_only_for_feishu_lark() {
+        assert!(domain_supports_topic_mode("feishu"));
+        assert!(domain_supports_topic_mode("lark"));
+        assert!(!domain_supports_topic_mode("custom"));
+    }
+
+    #[test]
+    fn test_build_runtime_inherits_channel_topic_mode_when_account_not_set() {
+        let mut cfg = crate::config::Config::test_defaults();
+        cfg.channels.insert(
+            "feishu".into(),
+            serde_yaml::from_str(
+                r#"
+enabled: true
+topic_mode: true
+accounts:
+  main:
+    enabled: true
+    app_id: "a"
+    app_secret: "b"
+"#,
+            )
+            .unwrap(),
+        );
+
+        let runtimes = build_feishu_runtime_contexts(&cfg);
+        assert_eq!(runtimes.len(), 1);
+        assert!(runtimes[0].config.topic_mode);
     }
 }

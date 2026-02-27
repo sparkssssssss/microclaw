@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use teloxide::prelude::*;
 use teloxide::types::{ChatAction, InputFile, ParseMode, ThreadId};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::agent_engine::{
     process_with_agent_with_events, should_suppress_user_error, AgentEvent, AgentRequestContext,
@@ -202,6 +202,7 @@ fn format_user_message(sender_name: &str, content: &str) -> String {
 pub struct TelegramRuntimeContext {
     pub channel_name: String,
     pub bot_username: String,
+    pub bot_user_id: Option<u64>,
     pub allowed_groups: Vec<i64>,
     pub allowed_user_ids: Vec<i64>,
     pub model: Option<String>,
@@ -257,11 +258,12 @@ pub fn build_telegram_runtime_contexts(
         } else {
             account_cfg.allowed_groups.clone()
         };
-        let allowed_user_ids = if account_cfg.allowed_user_ids.is_empty() {
-            tg_cfg.allowed_user_ids.clone()
-        } else {
-            account_cfg.allowed_user_ids.clone()
-        };
+        let mut allowed_user_ids = tg_cfg.allowed_user_ids.clone();
+        for user_id in &account_cfg.allowed_user_ids {
+            if !allowed_user_ids.contains(user_id) {
+                allowed_user_ids.push(*user_id);
+            }
+        }
         let model = account_cfg
             .model
             .as_deref()
@@ -281,6 +283,7 @@ pub fn build_telegram_runtime_contexts(
             TelegramRuntimeContext {
                 channel_name,
                 bot_username,
+                bot_user_id: None,
                 allowed_groups,
                 allowed_user_ids,
                 model,
@@ -298,6 +301,7 @@ pub fn build_telegram_runtime_contexts(
                 } else {
                     tg_cfg.bot_username.trim().to_string()
                 },
+                bot_user_id: None,
                 allowed_groups: tg_cfg.allowed_groups.clone(),
                 allowed_user_ids: tg_cfg.allowed_user_ids.clone(),
                 model: tg_cfg
@@ -325,8 +329,30 @@ async fn maybe_plugin_slash_response(
 pub async fn start_telegram_bot(
     state: Arc<AppState>,
     bot: Bot,
-    ctx: TelegramRuntimeContext,
+    mut ctx: TelegramRuntimeContext,
 ) -> anyhow::Result<()> {
+    // Ensure polling mode works even if this token was previously configured with webhook mode.
+    if let Err(err) = bot.delete_webhook().drop_pending_updates(false).await {
+        warn!(
+            "Telegram channel '{}' failed to clear webhook before polling: {:?}",
+            ctx.channel_name, err
+        );
+    }
+
+    if let Ok(me) = bot.get_me().await {
+        ctx.bot_user_id = Some(me.user.id.0);
+        if let Some(actual_username) = me.user.username {
+            let actual = actual_username.to_string();
+            if !actual.is_empty() && actual != ctx.bot_username {
+                info!(
+                    "Telegram channel '{}' runtime username updated from '{}' to '{}'",
+                    ctx.channel_name, ctx.bot_username, actual
+                );
+                ctx.bot_username = actual;
+            }
+        }
+    }
+
     mark_channel_started(&ctx.channel_name);
     let handler = Update::filter_message().endpoint(handle_message);
     let channel_name = ctx.channel_name.clone();
@@ -412,6 +438,7 @@ async fn handle_message(
     let chat_title = msg.chat.title().map(|t| t.to_string());
     let tg_channel_name = tg_ctx.channel_name.clone();
     let tg_bot_username = tg_ctx.bot_username.clone();
+    let tg_bot_user_id = tg_ctx.bot_user_id;
     let tg_allowed_groups = tg_ctx.allowed_groups.clone();
     let tg_allowed_user_ids = tg_ctx.allowed_user_ids.clone();
     let sender_user_id = msg.from.as_ref().and_then(|u| i64::try_from(u.id.0).ok());
@@ -431,13 +458,52 @@ async fn handle_message(
     let mut image_data: Option<(String, String)> = None; // (base64, media_type)
     let mut document_saved_path: Option<String> = None;
 
-    let should_respond = match runtime_chat_type {
-        "private" => true,
+    let (mentioned, text_mentions_bot, replied_to_bot, should_respond) = match runtime_chat_type {
+        "private" => (false, false, false, true),
         _ => {
             let bot_mention = format!("@{}", tg_bot_username);
-            text.contains(&bot_mention)
+            let mentioned = text
+                .to_ascii_lowercase()
+                .contains(&bot_mention.to_ascii_lowercase());
+            let text_mentions_bot = tg_bot_user_id
+                .map(|bot_id| {
+                    msg.entities().is_some_and(|entities| {
+                        entities.iter().any(|e| match &e.kind {
+                            teloxide::types::MessageEntityKind::TextMention { user } => {
+                                user.id.0 == bot_id
+                            }
+                            _ => false,
+                        })
+                    })
+                })
+                .unwrap_or(false);
+            let replied_to_bot = msg
+                .reply_to_message()
+                .and_then(|m| m.from.as_ref())
+                .map(|u| {
+                    u.is_bot
+                        && (Some(u.id.0) == tg_bot_user_id
+                            || u.username.as_deref() == Some(tg_bot_username.as_str()))
+                })
+                .unwrap_or(false);
+            (
+                mentioned,
+                text_mentions_bot,
+                replied_to_bot,
+                mentioned || text_mentions_bot || replied_to_bot,
+            )
         }
     };
+
+    debug!(
+        "Telegram inbound channel={} message_id={} chat_id={} chat_type={} should_respond={} text_preview={}",
+        tg_channel_name,
+        msg.id.0,
+        raw_chat_id,
+        runtime_chat_type,
+        should_respond,
+        text.chars().take(80).collect::<String>()
+    );
 
     if is_slash_command(&text) {
         let inbound_message_id = msg.id.0.to_string();
@@ -454,6 +520,7 @@ async fn handle_message(
         if !should_respond && !state.config.allow_group_slash_without_mention {
             return Ok(());
         }
+        let sender_id_text = sender_user_id.map(|v| v.to_string());
         let external_chat_id = raw_chat_id.to_string();
         let chat_title_for_lookup = chat_title.clone();
         let chat_type_for_lookup = db_chat_type.to_string();
@@ -468,7 +535,15 @@ async fn handle_message(
         })
         .await
         .unwrap_or(raw_chat_id);
-        if let Some(reply) = handle_chat_command(&state, chat_id, &tg_channel_name, &text).await {
+        if let Some(reply) = handle_chat_command(
+            &state,
+            chat_id,
+            &tg_channel_name,
+            &text,
+            sender_id_text.as_deref(),
+        )
+        .await
+        {
             let _ = bot.send_message(msg.chat.id, reply).await;
             return Ok(());
         }
@@ -782,6 +857,16 @@ async fn handle_message(
 
     // Determine if we should respond
     if !should_respond {
+        debug!(
+            "Telegram skip channel={} message_id={} reason=not_addressed mention={} text_mention={} reply_to_bot={} bot_username={} bot_user_id={:?}",
+            tg_channel_name,
+            msg.id.0,
+            mentioned,
+            text_mentions_bot,
+            replied_to_bot,
+            tg_bot_username,
+            tg_bot_user_id
+        );
         return Ok(());
     }
 
@@ -1879,7 +1964,7 @@ mod tests {
         assert_eq!(runtimes[1].1.channel_name, "telegram");
         assert_eq!(runtimes[1].1.bot_username, "sales_bot");
         assert_eq!(runtimes[1].1.allowed_groups, vec![101]);
-        assert_eq!(runtimes[1].1.allowed_user_ids, vec![1001]);
+        assert_eq!(runtimes[1].1.allowed_user_ids, vec![11, 1001]);
     }
 
     #[test]
