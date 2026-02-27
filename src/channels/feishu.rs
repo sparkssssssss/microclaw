@@ -76,7 +76,14 @@ pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
         },
         ChannelFieldDef {
             yaml_key: "topic_mode",
-            label: "Feishu topic mode (true/false, feishu/lark only)",
+            label: "Feishu topic mode (true/false, optional)",
+            default: "false",
+            secret: false,
+            required: false,
+        },
+        ChannelFieldDef {
+            yaml_key: "show_progress",
+            label: "Feishu topic progress updates (true/false, optional)",
             default: "false",
             secret: false,
             required: false,

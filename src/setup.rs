@@ -315,6 +315,13 @@ fn parse_boolish(value: &str, default_if_empty: bool) -> Result<bool, MicroClawE
     }
 }
 
+fn dynamic_field_is_bool(channel: &str, yaml_key: &str) -> bool {
+    matches!(
+        (channel, yaml_key),
+        ("feishu", "topic_mode" | "show_progress")
+    )
+}
+
 fn parse_bot_count(value: &str, field_key: &str) -> Result<usize, MicroClawError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -2499,18 +2506,24 @@ impl SetupApp {
                         ))
                     })?;
                     if ch.name == "feishu" {
-                        let topic_key = dynamic_slot_field_key(ch.name, slot, "topic_mode");
-                        let topic_raw = self.field_value(&topic_key);
-                        let topic_mode = if topic_raw.trim().is_empty() {
-                            false
-                        } else {
-                            parse_boolish(&topic_raw, false).map_err(|_| {
-                                MicroClawError::Config(format!(
-                                    "{} must be true/false (or 1/0)",
-                                    topic_key
-                                ))
-                            })?
-                        };
+                        let mut topic_mode = false;
+                        for yaml_key in ["topic_mode", "show_progress"] {
+                            let field_key = dynamic_slot_field_key(ch.name, slot, yaml_key);
+                            let field_raw = self.field_value(&field_key);
+                            let parsed = if field_raw.trim().is_empty() {
+                                false
+                            } else {
+                                parse_boolish(&field_raw, false).map_err(|_| {
+                                    MicroClawError::Config(format!(
+                                        "{} must be true/false (or 1/0)",
+                                        field_key
+                                    ))
+                                })?
+                            };
+                            if yaml_key == "topic_mode" {
+                                topic_mode = parsed;
+                            }
+                        }
                         if topic_mode {
                             let domain_key = dynamic_slot_field_key(ch.name, slot, "domain");
                             let domain = self.field_value(&domain_key).trim().to_ascii_lowercase();
@@ -3864,7 +3877,7 @@ fn save_config_yaml(
                 if v.trim().is_empty() {
                     continue;
                 }
-                if f.yaml_key == "topic_mode" {
+                if dynamic_field_is_bool(ch.name, f.yaml_key) {
                     let parsed = parse_boolish(v.trim(), false).map_err(|_| {
                         MicroClawError::Config(format!(
                             "{} must be true/false (or 1/0)",
@@ -5147,6 +5160,7 @@ sandbox:
             dynamic_slot_field_key("feishu", 1, "app_id"),
             dynamic_slot_field_key("feishu", 1, "app_secret"),
             dynamic_slot_field_key("feishu", 1, "domain"),
+            dynamic_slot_field_key("feishu", 1, "show_progress"),
         ];
         for key in hidden_keys {
             assert!(
@@ -5175,6 +5189,7 @@ sandbox:
             dynamic_slot_field_key("feishu", 1, "app_id"),
             dynamic_slot_field_key("feishu", 1, "app_secret"),
             dynamic_slot_field_key("feishu", 1, "domain"),
+            dynamic_slot_field_key("feishu", 1, "show_progress"),
         ];
         for key in shown_keys {
             assert!(
@@ -5295,6 +5310,39 @@ sandbox:
         save_config_yaml(&yaml_path, &values).unwrap();
         let s = fs::read_to_string(&yaml_path).unwrap();
         assert!(s.contains("topic_mode: true"));
+
+        let _ = fs::remove_file(&yaml_path);
+    }
+
+    #[test]
+    fn test_save_config_yaml_writes_feishu_show_progress_as_bool() {
+        let yaml_path = std::env::temp_dir().join(format!(
+            "microclaw_setup_feishu_show_progress_test_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+
+        let mut values = HashMap::new();
+        values.insert("ENABLED_CHANNELS".into(), "feishu".into());
+        values.insert(dynamic_bot_count_field_key("feishu"), "1".into());
+        values.insert(dynamic_slot_id_field_key("feishu", 1), "ops".into());
+        values.insert(
+            dynamic_slot_field_key("feishu", 1, "app_id"),
+            "app_id_1".into(),
+        );
+        values.insert(
+            dynamic_slot_field_key("feishu", 1, "app_secret"),
+            "app_secret_1".into(),
+        );
+        values.insert(
+            dynamic_slot_field_key("feishu", 1, "show_progress"),
+            "true".into(),
+        );
+        values.insert("LLM_PROVIDER".into(), "anthropic".into());
+        values.insert("LLM_API_KEY".into(), "key".into());
+
+        save_config_yaml(&yaml_path, &values).unwrap();
+        let s = fs::read_to_string(&yaml_path).unwrap();
+        assert!(s.contains("show_progress: true"));
 
         let _ = fs::remove_file(&yaml_path);
     }

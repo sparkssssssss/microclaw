@@ -281,6 +281,8 @@ interface DynChannelField {
   description: string
   /** If true, field value is a secret (not pre-filled from server config) */
   secret: boolean
+  /** Value type for payload encoding */
+  valueType?: 'string' | 'bool'
 }
 interface DynChannelDef {
   /** Channel name, e.g. "slack" */
@@ -335,6 +337,8 @@ const DYNAMIC_CHANNELS: DynChannelDef[] = [
       { yamlKey: 'domain', label: 'feishu_domain', placeholder: 'feishu', description: 'Use "feishu" for China, "lark" for international, or a custom base URL.', secret: false },
       { yamlKey: 'bot_username', label: 'feishu_bot_username', placeholder: 'feishu_bot_name', description: 'Optional Feishu-specific bot username override.', secret: false },
       { yamlKey: 'model', label: 'feishu_model', placeholder: 'claude-sonnet-4-5-20250929', description: 'Optional Feishu bot model override for this account.', secret: false },
+      { yamlKey: 'topic_mode', label: 'feishu_topic_mode', placeholder: 'false', description: 'Optional topic mode (true/false).', secret: false, valueType: 'bool' },
+      { yamlKey: 'show_progress', label: 'feishu_show_progress', placeholder: 'false', description: 'Optional progress updates in topic mode (true/false).', secret: false, valueType: 'bool' },
     ],
   },
   {
@@ -1064,6 +1068,26 @@ function parseI64ListCsvOrJsonArray(input: string, fieldName: string): number[] 
   }
 
   return parsedAsCsv()
+}
+
+function parseOptionalBoolString(input: string, fieldName: string): boolean | null {
+  const trimmed = input.trim().toLowerCase()
+  if (!trimmed) return null
+  if (trimmed === 'true' || trimmed === '1' || trimmed === 'yes') return true
+  if (trimmed === 'false' || trimmed === '0' || trimmed === 'no') return false
+  throw new Error(`${fieldName} must be true/false (or 1/0)`)
+}
+
+function dynamicFieldDraftValue(raw: unknown, valueType: 'string' | 'bool' = 'string'): string {
+  if (valueType === 'bool') {
+    if (typeof raw === 'boolean') return raw ? 'true' : 'false'
+    const text = String(raw || '').trim().toLowerCase()
+    if (!text) return ''
+    if (text === 'true' || text === '1' || text === 'yes') return 'true'
+    if (text === 'false' || text === '0' || text === 'no') return 'false'
+    return String(raw || '')
+  }
+  return String(raw || '')
 }
 
 function normalizeWorkingDirIsolation(value: unknown): 'chat' | 'shared' {
@@ -1874,7 +1898,10 @@ function App() {
                   pairs.push([`${ch.name}__bot_${slot}__has__${f.yamlKey}`, Boolean(String(accountCfg[f.yamlKey] || '').trim())])
                   pairs.push([`${ch.name}__bot_${slot}__${f.yamlKey}`, ''])
                 } else {
-                  pairs.push([`${ch.name}__bot_${slot}__${f.yamlKey}`, String(accountCfg[f.yamlKey] || '')])
+                  pairs.push([
+                    `${ch.name}__bot_${slot}__${f.yamlKey}`,
+                    dynamicFieldDraftValue(accountCfg[f.yamlKey], f.valueType || 'string'),
+                  ])
                 }
               }
             }
@@ -2337,7 +2364,17 @@ function App() {
               ? Boolean(configDraft[`${ch.name}__bot_${slot}__has__${f.yamlKey}`])
               : false
             if (val) {
-              fields[f.yamlKey] = val
+              if ((f.valueType || 'string') === 'bool') {
+                const parsed = parseOptionalBoolString(
+                  val,
+                  `${ch.name}_bot_${slot}_${f.yamlKey}`,
+                )
+                if (parsed !== null) {
+                  fields[f.yamlKey] = parsed
+                }
+              } else {
+                fields[f.yamlKey] = val
+              }
               hasAny = true
             } else if (hasSecret) {
               hasAny = true
