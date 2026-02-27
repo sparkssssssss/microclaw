@@ -233,7 +233,7 @@ mod tests {
 
     fn echo_env_command(var_name: &str) -> String {
         if cfg!(target_os = "windows") {
-            format!("echo %{var_name}%")
+            format!("$env:{var_name}")
         } else {
             format!("echo ${var_name}")
         }
