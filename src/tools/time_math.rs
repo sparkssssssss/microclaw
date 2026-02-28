@@ -34,6 +34,12 @@ impl CalculateTool {
     }
 }
 
+impl Default for CalculateTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn parse_timezone(tz_name: &str) -> Result<chrono_tz::Tz, String> {
     tz_name
         .parse::<chrono_tz::Tz>()
