@@ -3,25 +3,19 @@ name: Rust Static Build (AMD64)
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
 
 jobs:
   build:
     name: Build Static Binary
     runs-on: ubuntu-latest
+    # 使用专门针对 musl 静态编译优化的 Docker 镜像
+    # 该镜像预装了 musl gcc 和 openssl 静态库
+    container:
+      image: messense/rust-musl-cross:x86_64-musl
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
-    - name: Install musl tools
-      run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-    - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: x86_64-unknown-linux-musl
 
     - name: Build
       run: cargo build --release --target x86_64-unknown-linux-musl
@@ -30,5 +24,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: rust-app-amd64-static
-        # 注意：根据你的项目名称修改下方的文件名
         path: target/x86_64-unknown-linux-musl/release/你的项目名称
