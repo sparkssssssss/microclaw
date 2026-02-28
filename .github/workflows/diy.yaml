@@ -1,0 +1,26 @@
+name: Build Static Binary (Fixed)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Build with Musl & OpenSSL
+      # 这个 Action 会自动处理 OpenSSL 的静态编译问题
+      uses: messense/rust-musl-cross@v1
+      with:
+        target: x86_64-unknown-linux-musl
+        # 这一步会自动把编译好的文件放在 target/x86_64-unknown-linux-musl/release/ 下
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: microclaw-static
+        path: target/x86_64-unknown-linux-musl/release/microclaw
